@@ -19,7 +19,7 @@ const ANIM_IDLE := "idle"
 const ANIM_MOVE := "move"
 
 ## How tall the character stands, measured in court cells.
-const CELL_FILL := 1.6
+const CELL_FILL := 1.2
 
 ## Cell height assumed until Main reports the real court layout.
 const DEFAULT_CELL_HEIGHT := 64.0

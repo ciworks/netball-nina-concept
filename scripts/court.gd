@@ -23,7 +23,7 @@ extends TileMapLayer
 ## instead of a row of loose squares.
 ##
 ## The node transform is set from outside (main.gd) to match the court layers:
-## the overlay is a child of CourtRig, which applies the isometric flattening.
+## the overlay is a child of CourtRig, which carries the whole court view.
 
 const TILE_PX := 32
 ## One atlas tile per border mask, so the tile index is the mask itself.

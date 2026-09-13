@@ -8,30 +8,42 @@ extends Node2D
 ## every position. Test scenarios, reset, grid and debug toggles are exposed
 ## through the UI.
 ##
-## The court renders in a 3/4 top-down isometric view: grid cells project to a
-## diamond floor via _project_point(), and the tile floor plus painted markings
-## are transformed with it, while the player token and ball stay upright in
-## screen space at their projected positions.
+## The court renders in a 3/4 top-down view: the logical x axis (the court's
+## long axis) runs left to right across the screen, the logical y axis (its
+## width) runs down the screen squashed to half, and each row slides sideways as
+## it comes nearer the camera. The court therefore reads as one wide band with
+## horizontal side lines and slanted transverse lines, sized by COURT_FILL so it
+## sits inside the viewport with room around it. Both side lines are drawn across
+## the full width of the screen and only the right goal line is drawn, so the
+## court reads as carrying on past the left edge of the view. Grid points project
+## through _project_point(), and the tile floor plus painted markings are
+## transformed with it, while the player token and ball stay upright in screen
+## space at their projected positions.
 
 
 const GRID_MAX := 10
 
 const PAL_FLOOR := Color(0.96, 0.78, 0.45, 1.0)
-const PAL_LINE := Color(1.0, 1.0, 1.0, 0.55)
+const PAL_LINE := Color(1.0, 1.0, 1.0, 0.85)
 const PAL_LINE_STRONG := Color(1.0, 1.0, 1.0, 0.85)
 const PAL_BALL := Color(0.90, 0.36, 0.16, 1.0)
 const PAL_ROUTE := Color(0.08, 0.78, 0.74, 0.85)
 const PAL_CROSS := Color(1.0, 0.32, 0.28, 0.95)
 
-## Isometric 3/4 projection: the logical x axis rotates 45 deg and the logical
-## y component is halved, so a square grid renders as a classic diamond court.
-const ISO_COS := 0.7071067811865476
-const ISO_SIN := 0.3535533905932738
-const ISO_ROT := 45.0
-
-## Decorative trim texture (res://images/court_tile_edge.png). It is repeated
-## along the court's front-right edge so the boundary reads as a lined edge.
-const EDGE_STRIP_TEXTURE := preload("res://images/court_tile_edge.png")
+## 3/4 court view. VIEW_SQUASH halves the logical y axis (the court's width), so
+## the floor reads as a court seen from in front and above rather than as a flat
+## plan. VIEW_SKEW slides each logical row sideways in proportion to how near the
+## camera it is, which is what puts the slant on the court's transverse lines
+## (the ends and the third lines) while its side lines stay horizontal.
+const VIEW_SQUASH := 0.5
+## Positive, so a row nearer the camera slides right: the far end of a transverse
+## line (the court ends, the third lines, the mid line) sits to the left of its
+## near end.
+const VIEW_SKEW := 0.12
+## How much of the space the view can use the court actually takes. Below 1.0 the
+## court sits inside the viewport with room around it rather than touching the
+## edges.
+const COURT_FILL := 0.75
 
 const RATING_PERFECT_COLOR := Color(1.0, 0.85, 0.2, 1.0)
 const RATING_GREAT_COLOR := Color(0.32, 0.9, 0.52, 1.0)
@@ -48,12 +60,24 @@ const SCENARIOS := [
 enum State { READY, DRAWING, COMMITTED, MOVING, COMPLETE, INVALID, MISS }
 
 const GESTURE_SCRIPT := preload("res://scripts/gesture.gd")
+## The top-line coach that feeds the ball in. Main owns the round; coach.gd owns
+## the throw sequence and the ball's visual path.
+const COACH_SCRIPT := preload("res://scripts/coach.gd")
+
+## Seconds the player has to reach a loose ball after a dropped feed.
+const LOOSE_BALL_TIME := 6.0
+## Seconds the caught state holds before the next feed is set up.
+const CATCH_COMPLETE_TIME := 1.6
 
 @onready var player = $Player
 @onready var ui: CanvasLayer = $UI
 @onready var court_markings: TileMapLayer = $CourtRig/CourtMarkings
 @onready var court_route: CourtBoard = $CourtRig/CourtRoute
 @onready var court_rig: Node2D = $CourtRig
+
+## Top-line coach feeding the ball. Built in code (see _create_coach) so the
+## placeholder sprite needs no scene node and no texture file.
+var coach: CoachThrower = null
 
 var court_rect := Rect2()
 var cell_w := 1.0
@@ -90,9 +114,18 @@ var _phase := 0.0
 var _debug_accum := 0.0
 var _successes := 0
 
+# Coach feed state. _throw_pending holds a landed feed until the player is not
+# mid-action; the catch itself was already judged the moment the ball landed.
+var _throw_pending := false
+var _throw_caught := false
+var _ball_loose := false
+var _loose_timer := 0.0
+var _feed_count := 0
+
 
 func _ready() -> void:
 	_recompute_layout()
+	_create_coach()
 	get_viewport().size_changed.connect(_on_viewport_resized)
 	random_test()
 	ui.bind({
@@ -128,6 +161,13 @@ func _process(delta: float) -> void:
 	if _debug_accum <= 0.0:
 		_debug_accum = 0.15
 		_push_debug()
+	# A dropped feed is only lost while the player is free to chase it: the
+	# clock pauses during a drag or a walk, so a committed route always finishes.
+	if _ball_loose and state == State.READY:
+		_loose_timer -= delta
+		if _loose_timer <= 0.0:
+			_lose_loose_ball()
+	_resolve_pending_throw()
 	queue_redraw()
 
 
@@ -315,21 +355,44 @@ func _finish_movement() -> void:
 	player.set_moving(false)
 	player_cell = _grid_cell_of_screen(player.position)
 	player.set_label("Player (%d,%d)" % [player_cell.x, player_cell.y])
-	if player_cell == target_cell:
+	# A feed that landed while the token was still walking is settled first: the
+	# catch was already judged the instant the ball landed.
+	if _throw_pending and _throw_caught:
+		_complete_catch()
+		return
+	# Arriving on the landing cell only collects the ball once the coach has let it
+	# go: the feed cannot be completed while the ball is still in the coach's hands.
+	if player_cell == target_cell and _ball_released() and not _feed_airborne():
 		state = State.COMPLETE
 		_complete_timer = 1.8
 		highlight_timer = 1.8
 		_successes += 1
 		ui.set_status("COMPLETE")
-		ui.show_message("Target reached!", true)
-		ui.set_instruction("Court cleared - loading the next court.")
+		ui.show_message("Ball collected!", true)
+		ui.set_instruction("Court cleared - next feed loading.")
+		queue_redraw()
+		return
+	# The feed has not been settled yet, so a walk that fell short is not the end
+	# of the round: hand control straight back and let the ball decide.
+	state = State.READY
+	player.set_pulse(true)
+	if _ball_loose:
+		ui.set_phase_status("LOOSE BALL")
+		ui.set_instruction("Ball is loose at (%d,%d) - drag onto it." % [target_cell.x, target_cell.y])
+	elif _feed_airborne():
+		ui.set_phase_status("FEED INCOMING")
+		ui.set_instruction("Get onto (%d,%d) before the ball lands." % [target_cell.x, target_cell.y])
+	elif _feed_held():
+		# The coach still has the ball: the feed is on its way but nothing
+		# completes yet, because the round is only decided when the ball lands.
+		ui.set_phase_status("COACH FEED")
+		if player_cell == target_cell:
+			ui.set_instruction("Stay on (%d,%d) until the feed arrives." % [target_cell.x, target_cell.y])
+		else:
+			ui.set_instruction("Get onto (%d,%d) before the feed lands." % [target_cell.x, target_cell.y])
 	else:
-		state = State.MISS
-		_miss_timer = 1.2
-		player.set_pulse(false)
-		ui.set_status("MISS")
-		ui.show_message("Missed the ball - next court loading.", false)
-		ui.set_instruction("One chance per court.")
+		ui.set_status("READY")
+		_set_default_instruction()
 	queue_redraw()
 
 
@@ -338,6 +401,8 @@ func _enter_ready() -> void:
 	player.set_pulse(true)
 	ui.set_status("READY")
 	_set_default_instruction()
+	# A feed may have landed while the last drag was being repaired.
+	_resolve_pending_throw()
 	queue_redraw()
 
 
@@ -432,6 +497,7 @@ func _start_test(announce: String) -> void:
 	_set_default_instruction()
 	if announce != "":
 		ui.show_message(announce, true)
+	_start_coach_round()
 	queue_redraw()
 	_push_debug()
 
@@ -447,26 +513,31 @@ func _on_grid_toggle(on: bool) -> void:
 
 func _recompute_layout() -> void:
 	var v: Vector2 = get_viewport_rect().size
-	var margin := Vector2(40.0, 54.0)
-	# The floor is an 11x11 panel grid (GRID_MAX+1 panels per side). The cell
-	# size is chosen so the projected diamond (rotated 45 deg, y halved) fits
-	# the available area: its footprint is 2*ISO_COS*span wide and
-	# 2*ISO_SIN*span tall in cell units, where span = GRID_MAX + 1 panels.
+	var margin := Vector2(16.0, 14.0)
+	# The floor is an 11x11 panel grid (GRID_MAX+1 panels per side). This view
+	# puts the grid's x axis across the screen and squashes its y axis to
+	# VIEW_SQUASH, with VIEW_SKEW adding the row slide on top of the width; the
+	# cell size is the largest that fits that band in the available area.
 	var avail := v - margin * 2.0
 	var span := float(GRID_MAX + 1)
+	# The largest cell that fits the band, then scaled back by COURT_FILL so the
+	# court keeps its shape but leaves room around itself in the viewport.
 	var s := minf(
-		avail.x / (2.0 * ISO_COS * span),
-		avail.y / (2.0 * ISO_SIN * span)
-	)
+		avail.x / (span * (1.0 + VIEW_SKEW)),
+		avail.y / (span * VIEW_SQUASH)
+	) * COURT_FILL
 	cell_w = s
 	cell_h = s
-	# court_rect covers the GRID_MAX grid intervals. It is placed so its center
-	# sits at the viewport center: the iso projection is symmetric about that
-	# center, so the rendered diamond is centered in the viewport too.
+	# court_rect covers the GRID_MAX grid intervals, centered on the viewport to
+	# start with.
 	court_rect = Rect2(
 		v * 0.5 - Vector2(cell_w, cell_h) * float(GRID_MAX) * 0.5,
 		Vector2(cell_w * GRID_MAX, cell_h * GRID_MAX)
 	)
+	# The skewed band is not centered on the logical rectangle, so nudge the
+	# court until its projected outline (the whole panel area) IS centered -
+	# otherwise the court sits off to one side of the viewport.
+	court_rect.position += _view_unapply(v * 0.5 - _projected_panel_rect().get_center())
 	if player:
 		player.radius = _token_radius()
 		player.set_cell_height(cell_h)
@@ -474,29 +545,34 @@ func _recompute_layout() -> void:
 	if court_route:
 		# The court floor is authored tile data now: the sand checkerboard on the
 		# Court layer and the white line tiles on CourtMarkings, both under
-		# CourtRig. Every layer shares one transform - CourtRig carries the
-		# isometric flattening (scale before rotation in Godot node order) and
-		# each layer carries the 45 deg diamond rotation plus the cell-size
-		# scale - so the composition S*R matches the _project_point() iso
-		# projection exactly and the layers stay registered with each other.
+		# CourtRig. CourtRig carries the whole view as one matrix - logical x
+		# straight across the screen, logical y squashed by VIEW_SQUASH and slid
+		# sideways by VIEW_SKEW - and each layer carries only its atlas-to-cell
+		# scale, so a tile lands exactly where _project_point() puts the same
+		# logical point and the layers stay registered with each other.
 		var panel_origin := court_rect.position - Vector2(cell_w, cell_h) * 0.5
-		court_rig.position = _project_point(panel_origin)
-		court_rig.scale = Vector2(1.0, 0.5)
+		court_rig.transform = Transform2D(
+			Vector2(1.0, 0.0),
+			Vector2(VIEW_SKEW, VIEW_SQUASH),
+			_project_point(panel_origin))
 		for layer in court_rig.get_children():
 			if layer is TileMapLayer:
-				layer.rotation = deg_to_rad(ISO_ROT)
+				layer.rotation = 0.0
 				layer.scale = Vector2(cell_w / 32.0, cell_h / 32.0)
 		# A logical grid point sits at the CENTRE of floor panel (x, y), so the
 		# marking layer is shifted half a cell back in logical space. Its panel
 		# (x, y) then spans grid (x-1, y-1) .. (x, y), which is what makes the
 		# painted third-line and mid-line tiles land exactly where the drawn
-		# lines used to sit. The offset is specified in logical grid space and
-		# rotated into the layer's parent frame.
-		var mark_offset := Vector2(-cell_w, -cell_h) * 0.5
-		court_markings.position = Vector2(
-			ISO_COS * (mark_offset.x - mark_offset.y),
-			ISO_COS * (mark_offset.x + mark_offset.y))
+		# lines used to sit. The offset is a plain logical shift: the rig
+		# already carries the view, so the child layers stay axis-aligned in
+		# cell space.
+		court_markings.position = Vector2(-cell_w, -cell_h) * 0.5
 		court_route.layout(panel_origin, Vector2(cell_w, cell_h), GRID_MAX + 1)
+	if coach != null:
+		# The coach works in the same logical cell space as grid_to_screen(), so
+		# its origin is court_rect.position (not the half-cell-back panel origin
+		# the tile layers use) and a spot of (x, 0) lands on the top line.
+		coach.layout(court_rect.position, Vector2(cell_w, cell_h), _project_point)
 
 
 func _on_viewport_resized() -> void:
@@ -518,25 +594,53 @@ func screen_to_grid(pos: Vector2) -> Vector2:
 	return Vector2((logical.x - court_rect.position.x) / cell_w, (logical.y - court_rect.position.y) / cell_h)
 
 
-## Projects a logical (pre-isometric) point into the 3/4 top-down diamond view.
+## The view's linear part: a logical offset becomes the screen offset it renders
+## as - logical x across the screen, logical y squashed by VIEW_SQUASH and slid
+## sideways by VIEW_SKEW.
+func _view_apply(v: Vector2) -> Vector2:
+	return Vector2(v.x + VIEW_SKEW * v.y, VIEW_SQUASH * v.y)
+
+
+## Undoes the view's linear part, turning a screen-space offset back into the
+## logical offset that renders as it.
+func _view_unapply(v: Vector2) -> Vector2:
+	var ly := v.y / VIEW_SQUASH
+	return Vector2(v.x - VIEW_SKEW * ly, ly)
+
+
+## Projects a logical (court-space) point into the 3/4 court view. Measured from
+## the court center, so the view is anchored to the court itself rather than to
+## the viewport: recentering the court moves it without changing its shape.
 func _project_point(p: Vector2) -> Vector2:
 	var c := court_rect.get_center()
-	var v := p - c
-	return c + Vector2(ISO_COS * (v.x - v.y), ISO_SIN * (v.x + v.y))
+	return c + _view_apply(p - c)
 
 
-## Inverse of _project_point: map a screen point back to logical grid coords.
+## Inverse of _project_point: map a screen point back to logical court coords.
 func _unproject_point(p: Vector2) -> Vector2:
 	var c := court_rect.get_center()
-	var v := p - c
-	var lx := (v.x / ISO_COS + v.y / ISO_SIN) * 0.5
-	var ly := (v.y / ISO_SIN - v.x / ISO_COS) * 0.5
-	return c + Vector2(lx, ly)
+	return c + _view_unapply(p - c)
+
+
+## Screen-space box around the projected outline of the whole panel area (the
+## GRID_MAX+1 square of floor tiles). The skewed view leans that band sideways,
+## so its outline is not centered on the logical rectangle; this is what the
+## layout centers on the viewport instead.
+func _projected_panel_rect() -> Rect2:
+	var o := court_rect.position - Vector2(cell_w, cell_h) * 0.5
+	var ext := Vector2(cell_w * (GRID_MAX + 1), cell_h * (GRID_MAX + 1))
+	var p0 := _project_point(o)
+	var p1 := _project_point(o + Vector2(ext.x, 0.0))
+	var p2 := _project_point(o + ext)
+	var p3 := _project_point(o + Vector2(0.0, ext.y))
+	var mn := Vector2(minf(minf(p0.x, p1.x), minf(p2.x, p3.x)), minf(minf(p0.y, p1.y), minf(p2.y, p3.y)))
+	var mx := Vector2(maxf(maxf(p0.x, p1.x), maxf(p2.x, p3.x)), maxf(maxf(p0.y, p1.y), maxf(p2.y, p3.y)))
+	return Rect2(mn, mx - mn)
 
 
 ## Screen-space polyline for a logical circle lying on the court floor: the
 ## circle center and radius are in logical grid space, then projected so it
-## renders as the correct isometric ellipse.
+## renders as the correct flattened ellipse.
 func _floor_ellipse(logical_center: Vector2, r: float, points: int = 36) -> PackedVector2Array:
 	var arr := PackedVector2Array()
 	for i in range(points):
@@ -636,71 +740,55 @@ func _push_debug() -> void:
 		"state": _state_name(),
 		"extra": extra,
 		"segments": segments,
+		"coach": _coach_debug_text(),
 	})
 
 
 func _draw() -> void:
 	# Court floor: rendered by the Court TileMapLayer (z_index -1) behind this
-	# node, so no solid floor rect is drawn here. The boundary diamond wraps the
-	# full 11x11 panel area (court_rect grown by half a cell on every side),
-	# projected into the isometric view.
+	# node, so no solid floor rect is drawn here. The lines below follow the
+	# outer edge of the full 11x11 panel area (court_rect grown by half a cell on
+	# every side), projected into the court view as a slanted band.
 	var o := court_rect.position - Vector2(cell_w, cell_h) * 0.5
 	var ext := Vector2(cell_w * (GRID_MAX + 1), cell_h * (GRID_MAX + 1))
-	var corners := PackedVector2Array([
-		_project_point(o),
-		_project_point(o + Vector2(ext.x, 0)),
+	# The two long side lines run the whole width of the screen, so the court
+	# reads as though it carries on past the viewport. Side lines are horizontal
+	# in this view, so each one is a flat line at the projected y of its edge.
+	var screen_w: float = get_viewport_rect().size.x
+	var side_top: float = _project_point(o).y
+	var side_bottom: float = _project_point(o + Vector2(0.0, ext.y)).y
+	draw_line(Vector2(0.0, side_top), Vector2(screen_w, side_top), PAL_LINE_STRONG, 5.0, true)
+	draw_line(Vector2(0.0, side_bottom), Vector2(screen_w, side_bottom), PAL_LINE_STRONG, 5.0, true)
+	# Only the right goal line is drawn: the left end of the court is left open.
+	draw_line(
+		_project_point(o + Vector2(ext.x, 0.0)),
 		_project_point(o + ext),
-		_project_point(o + Vector2(0, ext.y)),
-		_project_point(o),
-	])
+		PAL_LINE_STRONG, 5.0, true)
 	#_draw_court_edge_strip()
-	draw_polyline(corners, PAL_LINE_STRONG, 5.0, true)
 	_draw_court_markings()
 	if show_grid:
 		_draw_grid_overlay()
-	_draw_ball()
+	# While the coach holds or throws the ball it draws the ball itself, at its
+	# own arc height, so the resting ball is only drawn when the coach is not
+	# the one owning it.
+	if coach == null or not (coach.ball_in_hand() or coach.ball_airborne()):
+		_draw_ball()
+	if coach != null and coach.indicator_visible():
+		_draw_destination_indicator()
 	if state == State.DRAWING or state == State.MOVING or state == State.COMMITTED:
 		_draw_route_overlay()
 	if highlight_timer > 0.0:
 		_draw_success_highlight()
 
 
-## Lines the front-right court edge with EDGE_STRIP_TEXTURE: the strip is
-## repeated along the projected lower-right diamond edge (front/bottom corner to
-## right corner) so it reads as one continuous trim following the court
-## boundary. Each repeat keeps the texture's own aspect, scaled so the strip
-## thickness stays proportional to the cell size, and the repeat count is chosen
-## so the strip ends exactly on the right corner.
-func _draw_court_edge_strip() -> void:
-	var o := court_rect.position - Vector2(cell_w, cell_h) * 0.5
-	var ext := Vector2(cell_w * (GRID_MAX + 1), cell_h * (GRID_MAX + 1))
-	var edge_a := _project_point(o + ext)                    # front (bottom) corner
-	var edge_b := _project_point(o + Vector2(ext.x, 0.0))    # right corner
-	var span := edge_b - edge_a
-	var tex_size := EDGE_STRIP_TEXTURE.get_size()
-	if span.length() < 1.0 or tex_size.x < 1.0 or tex_size.y < 1.0:
-		return
-	# Scale the strip so its height covers a fixed fraction of a cell.
-	var k := maxf(minf(cell_w, cell_h) * 0.30, 6.0) / tex_size.y
-	var count := maxi(int(round(span.length() / (tex_size.x * k))), 1)
-	var tile_w := span.length() / k / float(count)
-	draw_set_transform(edge_a, span.angle(), Vector2(k, k))
-	for i in count:
-		draw_texture_rect(
-			EDGE_STRIP_TEXTURE,
-			Rect2(Vector2(float(i) * tile_w, -tex_size.y * 0.5), Vector2(tile_w, tex_size.y)),
-			false)
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-
-
 func _draw_court_markings() -> void:
 	# The third lines and the mid line are painted tiles on the CourtMarkings
 	# layer now, so drawing them here too would double them up. Only the centre
 	# ring is still drawn: it is not part of the tile atlas. The ring center is
-	# projected so it lies on the diamond court and reads as an ellipse.
+	# projected so it lies on the court floor and reads as a squashed ellipse.
 	var mid_logical := court_rect.position + court_rect.size * 0.5
 	var center_r := maxf(cell_w, cell_h) * 1.2
-	draw_polyline(_floor_ellipse(mid_logical, center_r), PAL_LINE, 3.0, true)
+	draw_polyline(_floor_ellipse(mid_logical, center_r), PAL_LINE, 6.0, true)
 
 
 func _draw_grid_overlay() -> void:
@@ -724,14 +812,28 @@ func _draw_grid_overlay() -> void:
 
 
 func _draw_ball() -> void:
-	var p := grid_to_screen(target_cell)
 	var ball_r: float = player.radius * 1.18
+	# The guidance ring always marks the cell the player has to reach, whichever
+	# phase the feed is in, so it stays pinned to the target cell.
 	var target_logical := court_rect.position + Vector2(target_cell.x * cell_w, target_cell.y * cell_h)
-	# Pulsing target guidance ring painted on the floor (an ellipse in iso).
 	var ring_r: float = ball_r + 8.0 + sin(_phase * 4.0) * 3.0
 	draw_polyline(_floor_ellipse(target_logical, ring_r), Color(1, 1, 1, 0.6), 2.5, true)
-	# Soft floor shadow under the ball.
-	draw_colored_polygon(_floor_ellipse(target_logical, ball_r * 0.95), Color(0, 0, 0, 0.12))
+	# While the coach carries the ball, coach.gd draws it in the same node as the
+	# hand holding it, so it is skipped here to avoid a double image.
+	if coach != null and coach.round_active() and coach.ball_in_hand():
+		return
+	# Otherwise the ball is in play: coach.gd owns both its floor point and its
+	# arc height, so what is drawn and what the catch is judged against can never
+	# drift apart.
+	var floor_logical := target_logical
+	var p := grid_to_screen(target_cell)
+	if coach != null and coach.round_active():
+		floor_logical = coach.ball_floor_logical()
+		p = coach.ball_screen()
+		# A ball in the air reads as nearer the camera, so it grows a little.
+		ball_r *= 1.0 + 0.22 * coach.air_height_ratio()
+	# The shadow stays on the floor while the ball is above it.
+	draw_colored_polygon(_floor_ellipse(floor_logical, ball_r * 0.95), Color(0, 0, 0, 0.12))
 	# The ball itself stays an upright sphere at its projected position.
 	draw_circle(p, ball_r, PAL_BALL)
 	# Netball-ish seams and gloss.
@@ -789,3 +891,148 @@ func _draw_success_highlight() -> void:
 	draw_polyline(_floor_ellipse(p_logical, player.radius + 10.0 + glow * 5.0), col, 5.0, true)
 	var t_logical := court_rect.position + Vector2(target_cell.x * cell_w, target_cell.y * cell_h)
 	draw_polyline(_floor_ellipse(t_logical, player.radius * 1.18 + 10.0 + glow * 5.0), col, 5.0, true)
+
+
+# --- Coach feed ---------------------------------------------------------------
+# The coach runs its own sequence (spot pick, windup, release, flight) in coach.gd.
+# This half of the round owns what the sequence means: which cell the ball must
+# land on, whether that landing was a catch, and what a dropped feed leaves
+# behind.
+
+
+## The coach is built in code rather than authored in main.tscn: it is a
+## placeholder block figure with no texture, and every position it needs is
+## already computed by this script's projection helpers.
+func _create_coach() -> void:
+	coach = COACH_SCRIPT.new()
+	coach.name = "Coach"
+	add_child(coach)
+	coach.layout(court_rect.position, Vector2(cell_w, cell_h), _project_point)
+	coach.player_cell_provider = Callable(self, "_coach_judge_cell")
+	coach.throw_resolved.connect(_on_throw_resolved)
+
+
+## What the coach reads to decide caught vs missed: the token's cell at that
+## exact instant. The arc, the timings and the rendering never feed into this -
+## the outcome comes from grid logic alone.
+func _coach_judge_cell() -> Vector2i:
+	return player_cell
+
+
+## Starts one feed. The ball is thrown to the cell this round already marks as
+## the target. Nothing about the feed is decided yet: the verdict is taken when
+## the ball lands (see coach.gd), so a token that runs onto the cell during the
+## hold or the flight can still make the catch.
+func _start_coach_round() -> void:
+	_throw_pending = false
+	_throw_caught = false
+	_ball_loose = false
+	_loose_timer = 0.0
+	_feed_count += 1
+	if coach != null:
+		coach.start_round(target_cell)
+	ui.set_phase_status("COACH FEED")
+	player.set_pulse(true)
+
+
+func _on_throw_resolved(caught: bool, _destination: Vector2i) -> void:
+	_throw_caught = caught
+	_throw_pending = true
+
+
+## Settles a landed feed once the player is not mid-action. The catch was already
+## judged the moment the ball landed; this only chooses when to show it, so a
+## feed that lands during a drag resolves as soon as the drag is over.
+func _resolve_pending_throw() -> void:
+	if not _throw_pending or state != State.READY:
+		return
+	if _throw_caught:
+		_complete_catch()
+	else:
+		_begin_loose_ball()
+
+
+func _feed_airborne() -> bool:
+	return coach != null and coach.ball_airborne()
+
+
+## True once the coach has let the ball go. Nothing completes before that: the
+## round cannot be cleared while the feed is still in the coach's hands.
+func _ball_released() -> bool:
+	return coach == null or not coach.ball_in_hand()
+
+
+## True while the coach still has the ball in hand, before the throw is made.
+func _feed_held() -> bool:
+	return coach != null and coach.ball_in_hand()
+
+
+## The ball landed on the token: the feed was clean.
+func _complete_catch() -> void:
+	_throw_pending = false
+	_ball_loose = false
+	state = State.COMPLETE
+	_complete_timer = CATCH_COMPLETE_TIME
+	highlight_timer = CATCH_COMPLETE_TIME
+	_successes += 1
+	player.set_pulse(false)
+	ui.set_phase_status("CAUGHT")
+	ui.show_message("Clean catch! Next feed incoming.", true)
+	ui.set_instruction("")
+	queue_redraw()
+
+
+## The feed landed away from the token, so the ball sits where it landed and the
+## player has one chase to reach it. The clock only runs while the player is free
+## to move, so a committed route always plays out.
+func _begin_loose_ball() -> void:
+	_throw_pending = false
+	_ball_loose = true
+	_loose_timer = LOOSE_BALL_TIME
+	player.set_pulse(true)
+	ui.set_phase_status("LOOSE BALL")
+	ui.show_message("Feed missed - chase the loose ball!", false)
+	ui.set_instruction("Drag onto the ball at (%d,%d) before it is lost." % [target_cell.x, target_cell.y])
+	queue_redraw()
+
+
+func _lose_loose_ball() -> void:
+	_ball_loose = false
+	state = State.MISS
+	_miss_timer = 1.2
+	player.set_pulse(false)
+	ui.set_phase_status("MISS")
+	ui.show_message("Ball lost - next feed loading.", false)
+	ui.set_instruction("")
+	queue_redraw()
+
+
+## Marks where the feed will land. It reads the coach's deterministic destination
+## and closes onto it before the ball arrives, so the incoming feed can be read
+## and run onto.
+func _draw_destination_indicator() -> void:
+	if coach == null or not coach.indicator_visible():
+		return
+	var cell := coach.destination()
+	var t := coach.indicator_progress()
+	var logical := court_rect.position + Vector2(cell.x * cell_w, cell.y * cell_h)
+	var ball_r: float = player.radius * 1.18
+	var ring := lerpf(ball_r * 3.2, ball_r * 1.25, t)
+	var pulse := 0.5 + 0.5 * sin(_phase * 7.0)
+	var col := Color(1.0, 0.86, 0.28, lerpf(0.95, 0.55, t))
+	draw_polyline(_floor_ellipse(logical, ring), col, 4.0, true)
+	draw_polyline(_floor_ellipse(logical, ring * 0.62),
+			Color(col.r, col.g, col.b, col.a * (0.35 + 0.4 * pulse)), 2.0, true)
+	if t < 0.35:
+		var flash := 1.0 - t / 0.35
+		draw_colored_polygon(_floor_ellipse(logical, lerpf(ball_r * 1.5, ball_r * 1.1, t)),
+				Color(1, 1, 1, 0.28 * flash))
+
+
+func _coach_debug_text() -> String:
+	if coach == null:
+		return "-"
+	var txt := "%s -> (%d,%d)" % [coach.phase_name(), target_cell.x, target_cell.y]
+	if _ball_loose:
+		txt += " [loose %.1fs]" % maxf(_loose_timer, 0.0)
+	return txt

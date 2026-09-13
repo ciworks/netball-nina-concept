@@ -1,12 +1,18 @@
 [gd_resource type="TileSet" format=3 uid="uid://bg31wj3jfoqgf"]
 
 [ext_resource type="Texture2D" uid="uid://dia0bfc4giody" path="res://images/court_tile_edge.png" id="1_q5d7g"]
+[ext_resource type="Texture2D" uid="uid://cwpmx04ukiio5" path="res://images/court_sprite_sheet.png" id="2_gpwq1"]
 [ext_resource type="Texture2D" uid="uid://ckej5c04ohmv5" path="res://images/court_tile.png" id="2_r2rge"]
-[ext_resource type="Texture2D" uid="uid://dx7xsrtgwjpnk" path="res://tiles/court_tiles.svg" id="3_courttiles"]
 
-[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_court"]
-texture = ExtResource("3_courttiles")
-texture_region_size = Vector2i(32, 32)
+[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_gpwq1"]
+texture = ExtResource("2_r2rge")
+texture_region_size = Vector2i(64, 64)
+0:0/0 = 0
+
+[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_gvxje"]
+texture = ExtResource("2_gpwq1")
+margins = Vector2i(17, 0)
+texture_region_size = Vector2i(72, 64)
 0:0/0 = 0
 1:0/0 = 0
 2:0/0 = 0
@@ -14,14 +20,62 @@ texture_region_size = Vector2i(32, 32)
 4:0/0 = 0
 5:0/0 = 0
 6:0/0 = 0
-7:0/0 = 0
-8:0/0 = 0
-9:0/0 = 0
-
-[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_gpwq1"]
-texture = ExtResource("2_r2rge")
-texture_region_size = Vector2i(32, 32)
-0:0/0 = 0
+0:1/0 = 0
+1:1/0 = 0
+2:1/0 = 0
+3:1/0 = 0
+4:1/0 = 0
+5:1/0 = 0
+6:1/0 = 0
+0:2/0 = 0
+1:2/0 = 0
+2:2/0 = 0
+3:2/0 = 0
+4:2/0 = 0
+5:2/0 = 0
+6:2/0 = 0
+0:3/0 = 0
+1:3/0 = 0
+2:3/0 = 0
+3:3/0 = 0
+4:3/0 = 0
+5:3/0 = 0
+6:3/0 = 0
+0:4/0 = 0
+1:4/0 = 0
+2:4/0 = 0
+3:4/0 = 0
+4:4/0 = 0
+5:4/0 = 0
+6:4/0 = 0
+0:5/0 = 0
+1:5/0 = 0
+2:5/0 = 0
+3:5/0 = 0
+4:5/0 = 0
+5:5/0 = 0
+6:5/0 = 0
+0:6/0 = 0
+1:6/0 = 0
+2:6/0 = 0
+3:6/0 = 0
+4:6/0 = 0
+5:6/0 = 0
+6:6/0 = 0
+0:7/0 = 0
+1:7/0 = 0
+2:7/0 = 0
+3:7/0 = 0
+4:7/0 = 0
+5:7/0 = 0
+6:7/0 = 0
+0:8/0 = 0
+1:8/0 = 0
+2:8/0 = 0
+3:8/0 = 0
+4:8/0 = 0
+5:8/0 = 0
+6:8/0 = 0
 
 [sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_r2rge"]
 texture = ExtResource("1_q5d7g")
@@ -29,7 +83,8 @@ texture_region_size = Vector2i(32, 32)
 0:0/0 = 0
 
 [resource]
-tile_size = Vector2i(32, 32)
-sources/0 = SubResource("TileSetAtlasSource_court")
+tile_offset_axis = 1
+tile_size = Vector2i(64, 64)
 sources/2 = SubResource("TileSetAtlasSource_gpwq1")
 sources/4 = SubResource("TileSetAtlasSource_r2rge")
+sources/3 = SubResource("TileSetAtlasSource_gvxje")

@@ -53,6 +53,13 @@ func set_status(text: String) -> void:
 		_status.text = "Movement: " + text
 
 
+## Status pill without the "Movement:" prefix, for phases the route system does
+## not own (the coach's feed, a loose ball, the catch itself).
+func set_phase_status(text: String) -> void:
+	if _status:
+		_status.text = text
+
+
 func set_instruction(text: String) -> void:
 	if _instruction:
 		_instruction.text = text
@@ -81,7 +88,8 @@ func set_debug(info: Dictionary) -> void:
 	var extra_txt := "-"
 	if int(info.get("extra", -1)) >= 0:
 		extra_txt = "+%d over optimal" % int(info["extra"])
-	txt += "Optimality Gap: %s" % extra_txt
+	txt += "Optimality Gap: %s\n" % extra_txt
+	txt += "Coach: %s" % info.get("coach", "-")
 	_debug_label.text = txt
 
 

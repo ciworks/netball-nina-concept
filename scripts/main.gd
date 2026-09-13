@@ -46,7 +46,7 @@ const VIEW_SKEW := 0.12
 const COURT_FILL := 0.75
 
 const RATING_PERFECT_COLOR := Color(1.0, 0.85, 0.2, 1.0)
-const RATING_GREAT_COLOR := Color(0.32, 0.9, 0.52, 1.0)
+const RATING_GOOD_COLOR := Color(0.32, 0.9, 0.52, 1.0)
 const RATING_OK_COLOR := Color(1.0, 0.62, 0.25, 1.0)
 
 const SCENARIOS := [
@@ -104,6 +104,11 @@ var _move_pts: Array[Vector2] = []
 var _move_cum: Array[float] = []
 var _move_dist := 0.0
 var _move_total := 0.0
+## How long the token has stood on its current cell, in seconds. Reset every time
+## the token changes cell, so it is the token's settling time - what the coach
+## reads to tell a player who is set on the ball from one who has only just
+## arrived, and therefore only has a coin flip at taking it.
+var _cell_dwell := 0.0
 
 var show_grid := false
 var highlight_timer := 0.0
@@ -114,11 +119,16 @@ var _phase := 0.0
 var _debug_accum := 0.0
 var _successes := 0
 
-# Coach feed state. _throw_pending holds a landed feed until the player is not
-# mid-action; the catch itself was already judged the moment the ball landed.
+# Coach feed state. _throw_pending holds a finished feed until the player is not
+# mid-action; the outcome was already judged the moment the ball last touched
+# down. _ball_out marks a feed that landed outside the court, which is a miss.
 var _throw_pending := false
 var _throw_caught := false
+var _ball_out := false
 var _ball_loose := false
+## Cell a feed's ball came to rest on when it was not caught, which is where the
+## loose-ball chase sends the player.
+var _loose_cell := Vector2i.ZERO
 var _loose_timer := 0.0
 var _feed_count := 0
 
@@ -140,6 +150,9 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_phase += delta
+	# The token's settling clock. It is only reset when the token changes cell, so
+	# the coach can tell a player who is set on the ball from one still arriving.
+	_cell_dwell += delta
 	match state:
 		State.INVALID:
 			_invalid_timer -= delta
@@ -305,16 +318,21 @@ func _commit_route(cells: Array[Vector2i]) -> void:
 	player.set_moving(true)
 	ui.set_status("MOVING")
 	ui.set_instruction("")
-	if not cells.is_empty() and cells[cells.size() - 1] == target_cell:
-		_show_route_rating(cells)
+	# No rating here: drawing a route that happens to end on the ball is not a
+	# result. The words are flashed by _complete_catch() instead, so PERFECT /
+	# GOOD / OK only ever appears for a ball that was actually taken.
 	queue_redraw()
 
 
-## Rates a committed route that ends at the ball against the shortest possible
-## route (straight Manhattan distance), then asks the UI to flash the verdict.
+## Rates the route the token actually walked against the shortest route to the
+## cell it ended on (straight Manhattan distance), then asks the UI to flash the
+## verdict. Called only from _complete_catch(), so the words never appear unless
+## a catch was made.
 func _show_route_rating(cells: Array[Vector2i]) -> void:
+	if cells.size() < 2:
+		return
 	var actual := _route_cells(cells)
-	var optimal := _manhattan(cells[0], target_cell)
+	var optimal := _manhattan(cells[0], cells[cells.size() - 1])
 	var extra := actual - optimal
 	var word := "PERFECT"
 	var col := RATING_PERFECT_COLOR
@@ -322,8 +340,8 @@ func _show_route_rating(cells: Array[Vector2i]) -> void:
 		word = "OK"
 		col = RATING_OK_COLOR
 	elif extra >= 1:
-		word = "GREAT"
-		col = RATING_GREAT_COLOR
+		word = "GOOD"
+		col = RATING_GOOD_COLOR
 	ui.flash_rating(word, col)
 
 
@@ -348,21 +366,27 @@ func _update_player_cell_label() -> void:
 	var c := _grid_cell_of_screen(player.position)
 	if c != player_cell:
 		player_cell = c
+		# A new cell means the token is not settled there yet.
+		_cell_dwell = 0.0
 		player.set_label("Player (%d,%d)" % [c.x, c.y])
 
 
 func _finish_movement() -> void:
 	player.set_moving(false)
 	player_cell = _grid_cell_of_screen(player.position)
+	# The token has just stopped on this cell, so its settling clock restarts.
+	_cell_dwell = 0.0
 	player.set_label("Player (%d,%d)" % [player_cell.x, player_cell.y])
 	# A feed that landed while the token was still walking is settled first: the
 	# catch was already judged the instant the ball landed.
 	if _throw_pending and _throw_caught:
 		_complete_catch()
 		return
-	# Arriving on the landing cell only collects the ball once the coach has let it
-	# go: the feed cannot be completed while the ball is still in the coach's hands.
-	if player_cell == target_cell and _ball_released() and not _feed_airborne():
+	# Reaching the ball only collects it once the coach has let it go: the feed
+	# cannot be completed while the ball is still in the coach's hands. Once the
+	# feed is over the ball sits wherever it came to rest, so it is the ball's real
+	# position - not the cell the throw was aimed at - that has to be reached.
+	if player_cell == _collect_cell() and _ball_released() and not _feed_airborne():
 		state = State.COMPLETE
 		_complete_timer = 1.8
 		highlight_timer = 1.8
@@ -813,9 +837,12 @@ func _draw_grid_overlay() -> void:
 
 func _draw_ball() -> void:
 	var ball_r: float = player.radius * 1.18
-	# The guidance ring always marks the cell the player has to reach, whichever
-	# phase the feed is in, so it stays pinned to the target cell.
-	var target_logical := court_rect.position + Vector2(target_cell.x * cell_w, target_cell.y * cell_h)
+	# The guidance ring marks the cell the ball is actually on, whichever phase the
+	# feed is in: while the coach holds it that is the throwing spot, and once it
+	# is in play the ring follows the ball through its bounces, so the ring and the
+	# ball never disagree about where the feed is.
+	var ball_cell_now := _collect_cell()
+	var target_logical := court_rect.position + Vector2(ball_cell_now.x * cell_w, ball_cell_now.y * cell_h)
 	var ring_r: float = ball_r + 8.0 + sin(_phase * 4.0) * 3.0
 	draw_polyline(_floor_ellipse(target_logical, ring_r), Color(1, 1, 1, 0.6), 2.5, true)
 	# While the coach carries the ball, coach.gd draws it in the same node as the
@@ -909,7 +936,9 @@ func _create_coach() -> void:
 	add_child(coach)
 	coach.layout(court_rect.position, Vector2(cell_w, cell_h), _project_point)
 	coach.player_cell_provider = Callable(self, "_coach_judge_cell")
+	coach.player_dwell_provider = Callable(self, "_player_dwell_seconds")
 	coach.throw_resolved.connect(_on_throw_resolved)
+	coach.ball_out_of_bounds.connect(_on_ball_out_of_bounds)
 
 
 ## What the coach reads to decide caught vs missed: the token's cell at that
@@ -919,6 +948,14 @@ func _coach_judge_cell() -> Vector2i:
 	return player_cell
 
 
+## How long the token has been standing on its current cell, in seconds. The
+## coach reads this to tell a player who is set on the landing spot from one who
+## has only just arrived: a set player takes the ball cleanly, an arriving one
+## only gets a roll of the dice and may see the ball come off them.
+func _player_dwell_seconds() -> float:
+	return _cell_dwell
+
+
 ## Starts one feed. The ball is thrown to the cell this round already marks as
 ## the target. Nothing about the feed is decided yet: the verdict is taken when
 ## the ball lands (see coach.gd), so a token that runs onto the cell during the
@@ -926,6 +963,7 @@ func _coach_judge_cell() -> Vector2i:
 func _start_coach_round() -> void:
 	_throw_pending = false
 	_throw_caught = false
+	_ball_out = false
 	_ball_loose = false
 	_loose_timer = 0.0
 	_feed_count += 1
@@ -940,13 +978,22 @@ func _on_throw_resolved(caught: bool, _destination: Vector2i) -> void:
 	_throw_pending = true
 
 
+## The ball touched down outside the court, so the feed is dead. Deferred exactly
+## like a landed feed, so a committed route always plays out before the reset.
+func _on_ball_out_of_bounds(_cell: Vector2i) -> void:
+	_ball_out = true
+	_throw_pending = true
+
+
 ## Settles a landed feed once the player is not mid-action. The catch was already
 ## judged the moment the ball landed; this only chooses when to show it, so a
 ## feed that lands during a drag resolves as soon as the drag is over.
 func _resolve_pending_throw() -> void:
 	if not _throw_pending or state != State.READY:
 		return
-	if _throw_caught:
+	if _ball_out:
+		_feed_out_of_bounds()
+	elif _throw_caught:
 		_complete_catch()
 	else:
 		_begin_loose_ball()
@@ -967,10 +1014,26 @@ func _feed_held() -> bool:
 	return coach != null and coach.ball_in_hand()
 
 
-## The ball landed on the token: the feed was clean.
+## The cell the ball actually occupies right now: while the coach holds it that is
+## the throwing spot, and once it is in play it is wherever the physics has carried
+## it. This is what has to be reached to collect the ball, so a feed that bounces
+## away from the cell it was aimed at is collected where it really came to rest.
+func _collect_cell() -> Vector2i:
+	if coach != null:
+		return coach.ball_cell()
+	return target_cell
+
+
+## The ball landed on the token: the feed was clean. This is the only place a
+## route rating flashes, so PERFECT / GOOD / OK always means a ball was taken.
 func _complete_catch() -> void:
 	_throw_pending = false
 	_ball_loose = false
+	# Rate the route the token actually walked. A catch made without moving - the
+	# token was already set on the spot waiting - has no route to judge, so nothing
+	# flashes in that case.
+	if committed_route.size() >= 2:
+		_show_route_rating(committed_route)
 	state = State.COMPLETE
 	_complete_timer = CATCH_COMPLETE_TIME
 	highlight_timer = CATCH_COMPLETE_TIME
@@ -987,12 +1050,16 @@ func _complete_catch() -> void:
 ## to move, so a committed route always plays out.
 func _begin_loose_ball() -> void:
 	_throw_pending = false
+	_ball_out = false
 	_ball_loose = true
+	# The ball is wherever it came to rest, which is no longer the cell the feed
+	# was aimed at once it has bounced on.
+	_loose_cell = coach.ball_cell() if coach != null else target_cell
 	_loose_timer = LOOSE_BALL_TIME
 	player.set_pulse(true)
 	ui.set_phase_status("LOOSE BALL")
-	ui.show_message("Feed missed - chase the loose ball!", false)
-	ui.set_instruction("Drag onto the ball at (%d,%d) before it is lost." % [target_cell.x, target_cell.y])
+	ui.show_message("Feed not caught - chase the ball!", false)
+	ui.set_instruction("Drag onto the ball at (%d,%d) before it is lost." % [_loose_cell.x, _loose_cell.y])
 	queue_redraw()
 
 
@@ -1003,6 +1070,21 @@ func _lose_loose_ball() -> void:
 	player.set_pulse(false)
 	ui.set_phase_status("MISS")
 	ui.show_message("Ball lost - next feed loading.", false)
+	ui.set_instruction("")
+	queue_redraw()
+
+
+## The feed touched down outside the court: a miss. The next coach move is set up
+## once the miss beat has passed, exactly like a lost loose ball.
+func _feed_out_of_bounds() -> void:
+	_throw_pending = false
+	_ball_out = false
+	_ball_loose = false
+	state = State.MISS
+	_miss_timer = 1.4
+	player.set_pulse(false)
+	ui.set_phase_status("OUT OF BOUNDS")
+	ui.show_message("Feed out of bounds - miss.", false)
 	ui.set_instruction("")
 	queue_redraw()
 
@@ -1032,7 +1114,10 @@ func _draw_destination_indicator() -> void:
 func _coach_debug_text() -> String:
 	if coach == null:
 		return "-"
-	var txt := "%s -> (%d,%d)" % [coach.phase_name(), target_cell.x, target_cell.y]
+	# The debug line follows the ball, not the intended landing spot: once the feed
+	# starts bouncing, where the ball actually is is what matters.
+	var ball := _collect_cell()
+	var txt := "%s -> ball (%d,%d)" % [coach.phase_name(), ball.x, ball.y]
 	if _ball_loose:
 		txt += " [loose %.1fs]" % maxf(_loose_timer, 0.0)
 	return txt

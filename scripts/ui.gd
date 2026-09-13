@@ -98,7 +98,7 @@ func set_debug_panel_visible(visible: bool) -> void:
 		_debug_panel.visible = visible
 
 
-## Flashes a big kinetic rating word (PERFECT / GREAT / OK) in the center of
+## Flashes a big kinetic rating word (PERFECT / GOOD / OK) in the center of
 ## the screen for about two seconds. Any previous rating is replaced.
 func flash_rating(word: String, color: Color) -> void:
 	if _rating_tween and _rating_tween.is_valid():

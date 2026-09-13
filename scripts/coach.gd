@@ -9,13 +9,18 @@ extends Node2D
 ## far the token has to run to the landing spot and how long the feed is, with the
 ## destination ring already up, so the player can read the feed and get there.
 ##
-## The visual ball never decides the outcome. The catch is judged at the single
-## instant the ball lands: the token has to be on the destination cell then, which
-## is the cell Main reports through player_cell_provider. Arriving at any point up
-## to that moment counts, so a token that was still on its way when the ball left
-## the hand can still get there in time. The arc only has to look right: it is not
-## simulated, and nothing about its shape, speed or wobble can change who catches
-## the ball.
+## The ball is thrown as a real projectile. Gravity and the vertical launch
+## speed come from the arc the feed should trace, and the horizontal speed is set
+## so the FIRST bounce lands exactly on the destination - which is what keeps the
+## feed's targeting meaningful. After that bounce nothing is aimed: the ball
+## carries on the way it was thrown, losing height on each bounce and speed to the
+## floor, until the token takes it, it runs out of momentum, or it touches down
+## outside the court.
+##
+## The catch is judged on contact: the ball's landing point is compared with the
+## cell Main reports through player_cell_provider, so the token has to be on the
+## ball when it arrives. Reaching it mid-flight is fine, because the ball is judged
+## where it actually comes down; arriving after it has touched down is too late.
 ##
 ## The throw always starts on the top line, which in this court view is the
 ## court's upper horizontal edge, i.e. logical y == 0. Cells run 0..GRID_MAX
@@ -29,9 +34,14 @@ extends Node2D
 ## Main owns the round: it calls start_round() with the cell the ball must land
 ## on, then listens for throw_resolved(caught, destination).
 
-## Emitted once, the instant the ball lands. `caught` is the deterministic
-## verdict; `destination` is the cell the ball landed on.
+## Emitted once, the instant the ball comes to rest. `caught` is the verdict;
+## `destination` is the cell the ball last touched down on.
 signal throw_resolved(caught: bool, destination: Vector2i)
+
+## Emitted when the ball touches down outside the court: past the bottom
+## transverse line (logical y > GRID_MAX) or beyond the right goal line
+## (x > GRID_MAX). The feed is dead and Main resets to the next coach move.
+signal ball_out_of_bounds(cell: Vector2i)
 
 enum Phase { IDLE, HOLD, WINDUP, RELEASE, FLIGHT, REST }
 
@@ -47,7 +57,7 @@ const SPOT_MAX := 9
 ## already up, so that is the player's window to read the feed and get there -
 ## and, more weakly, with the length of the feed itself. HOLD_MIN is the floor:
 ## the coach never throws sooner than this. See _hold_delay().
-const HOLD_MIN := 3.0
+const HOLD_MIN := 1.0
 const HOLD_MAX := 7.0
 const HOLD_PER_PLAYER_CELL := 0.30
 const HOLD_PER_THROW_CELL := 0.10
@@ -66,6 +76,32 @@ const FLIGHT_MAX := 1.5
 const ARC_BASE := 1.3
 const ARC_PER_CELL := 0.18
 const ARC_MAX := 2.5
+
+## Real ball physics, in court-cell units. The first bounce is aimed at the
+## destination; after that the ball keeps travelling the way it was thrown,
+## losing height to BALL_RESTITUTION and forward speed to BALL_FRICTION on each
+## bounce, until it is taken, runs out of steam, or leaves the court.
+const BALL_RESTITUTION := 0.52
+const BALL_FRICTION := 0.82
+## A bounce lower than BALL_MIN_BOUNCE, or a roll slower than BALL_ROLL_MIN,
+## ends the feed: the ball has settled where it stopped.
+const BALL_MIN_BOUNCE := 0.7
+const BALL_ROLL_MIN := 0.9
+## How close, in court cells, the token has to be to a bouncing ball to take it.
+const CATCH_RADIUS := 0.75
+
+## Player collision. A token that has been standing on its cell for at least
+## SETTLED_TIME takes the ball cleanly every time. A token that has only just
+## arrived - or is still on its way - is not set for the ball: it then takes it
+## only on a roll of CATCH_CHANCE, and the rest of the time the ball REBOUNDS off
+## the player and stays live.
+const SETTLED_TIME := 0.5
+const CATCH_CHANCE := 0.5
+## How much pace the ball keeps when it comes off the player, and how long it
+## stays untouchable afterwards so it can clear the player's reach before it can
+## be contested again.
+const PLAYER_BOUNCE := 0.7
+const REBOUND_LOCK := 0.35
 
 ## How long the destination ring takes to close onto the landing spot.
 const INDICATOR_LOCK := 0.7
@@ -97,6 +133,9 @@ const BALL_COLOR := Color(0.90, 0.36, 0.16, 1.0)
 
 ## Injected by Main: asks what the token's cell is at the moment the ball lands.
 var player_cell_provider := Callable()
+## Injected by Main: how many seconds the token has been standing on that cell.
+## Drives the clean-catch check in _clean_catch().
+var player_dwell_provider := Callable()
 
 var _origin := Vector2.ZERO
 var _cell_px := Vector2(64.0, 64.0)
@@ -111,15 +150,22 @@ var _started := false
 var _destination := Vector2i(6, 5)
 var _flight_from := Vector2.ZERO
 var _flight_to := Vector2.ZERO
-var _flight_t := 0.0
 var _flight_time := 0.6
 var _arc_peak := 1.4
 var _reveal_t := 0.0
+## Seconds left before the ball can be contested again after it has come off the
+## player, so a rebound gets clear of the token's reach first.
+var _rebound_lock := 0.0
 
-# Ball and pose.
+# Ball and pose. _ball_ground is the ball's floor position and _ball_height its
+# height above the floor, both in court cells; _ball_vel and _ball_vh are its
+# horizontal and vertical velocities and _ball_g this throw's gravity.
 var _ball_ground := Vector2.ZERO
 var _ball_height := 0.0
 var _air_ratio := 0.0
+var _ball_vel := Vector2.ZERO
+var _ball_vh := 0.0
+var _ball_g := 30.0
 var _arm := ARM_REST
 var _lean := Vector2.ZERO
 var _indicator := false
@@ -166,12 +212,15 @@ func start_round(destination: Vector2i) -> void:
 	_reveal_t = 0.0
 	_indicator = true
 	_phase = Phase.HOLD
+	_rebound_lock = 0.0
 
 
 func _process(delta: float) -> void:
 	_pose_phase += delta
 	if _indicator:
 		_reveal_t += delta
+	if _rebound_lock > 0.0:
+		_rebound_lock -= delta
 	match _phase:
 		Phase.HOLD:
 			_process_hold(delta)
@@ -253,49 +302,133 @@ func _process_release(delta: float) -> void:
 
 func _launch() -> void:
 	_phase = Phase.FLIGHT
-	_flight_t = 0.0
 	_flight_from = _carry_point()
 	_flight_to = Vector2(float(_destination.x), float(_destination.y))
 	var span := _flight_from.distance_to(_flight_to)
 	_flight_time = clampf(FLIGHT_BASE + span * FLIGHT_PER_CELL, FLIGHT_MIN, FLIGHT_MAX)
 	_arc_peak = clampf(ARC_BASE + span * ARC_PER_CELL, ARC_BASE, ARC_MAX)
+	# The throw is a real projectile. Gravity and the vertical launch speed come
+	# from the arc this feed should trace (peak height over the flight time); the
+	# horizontal speed is then set so the FIRST bounce lands exactly on the
+	# destination, which is what keeps the feed's targeting meaningful. After that
+	# bounce nothing is aimed: the ball carries on the way it was thrown.
+	_ball_g = 8.0 * _arc_peak / maxf(_flight_time * _flight_time, 0.001)
+	_ball_vh = 4.0 * _arc_peak / maxf(_flight_time, 0.001)
+	_ball_ground = _flight_from
 	_ball_height = CARRY_HEIGHT
+	_ball_vel = Vector2.ZERO
 	_air_ratio = 0.0
+	# Time from release until the ball first reaches the floor, so the horizontal
+	# speed covers the throw distance in exactly that time.
+	var land_time := (_ball_vh + sqrt(_ball_vh * _ball_vh + 2.0 * _ball_g * CARRY_HEIGHT)) / _ball_g
+	if span > 0.001 and land_time > 0.001:
+		_ball_vel = (_flight_to - _flight_from) / land_time
 
 
 func _process_flight(delta: float) -> void:
-	_flight_t = minf(_flight_t + delta / _flight_time, 1.0)
-	var t := _flight_t
-	# Horizontal travel eases out of the hand and into the landing spot.
-	var eased := t * t * (3.0 - 2.0 * t)
-	_ball_ground = _flight_from.lerp(_flight_to, eased)
-	# Height is a deterministic read-out, not a simulation: it eases from the
-	# release height down to the floor while a sine hump lifts the ball into the
-	# arc. The result reads as a real throw while the outcome stays decided by
-	# _resolve() alone.
-	_ball_height = lerpf(CARRY_HEIGHT, 0.0, t) + sin(PI * t) * _arc_peak
+	# Real motion: the ball keeps the horizontal velocity it was thrown with,
+	# while gravity pulls it down. The step is clamped so a frame hitch cannot
+	# teleport the ball past a bounce or over a boundary line.
+	var step := minf(delta, 0.05)
+	_ball_ground += _ball_vel * step
+	_ball_vh -= _ball_g * step
+	_ball_height += _ball_vh * step
 	_air_ratio = clampf(_ball_height / maxf(_arc_peak + CARRY_HEIGHT, 0.001), 0.0, 1.0)
 	_arm = lerpf(_arm, ARM_RELEASE + 0.35, clampf(delta * 5.0, 0.0, 1.0))
-	if t >= 1.0:
-		_resolve()
+	if _ball_height <= 0.0 and _ball_vh < 0.0:
+		_bounce()
 
 
-## The single decision point of the whole throw: the ball is on the floor, so ask
-## Main where the token is now and compare that cell with the destination. The
-## token only has to be there when the ball arrives - it may still have been on
-## its way when the ball was released.
-func _resolve() -> void:
+## The ball has touched down. It bounces - losing height to BALL_RESTITUTION and
+## forward speed to BALL_FRICTION - unless the token is there to take it, it has
+## run out of energy, or it has touched down outside the court.
+func _bounce() -> void:
+	_ball_height = 0.0
+	var cell := _floor_cell(_ball_ground)
+	if _is_out_of_bounds(_ball_ground):
+		_finish_feed(false, true, cell)
+		return
+	# Ball against player. The token takes it cleanly if it was set on the spot;
+	# a token that has only just arrived gets a roll of the dice, and otherwise
+	# the ball comes off it and stays live.
+	if _rebound_lock <= 0.0 and _token_is_at(_ball_ground):
+		if _clean_catch():
+			_finish_feed(true, false, cell)
+			return
+		_rebound()
+		return
+	_ball_vh = -_ball_vh * BALL_RESTITUTION
+	_ball_vel *= BALL_FRICTION
+	# Too little bounce left, or too slow a roll, to keep the ball alive: it
+	# settles where it stopped and becomes a loose ball to chase.
+	if _ball_vh < BALL_MIN_BOUNCE or _ball_vel.length() < BALL_ROLL_MIN:
+		_finish_feed(false, false, cell)
+
+
+## True when the token takes the ball cleanly. A token that has been standing on
+## its cell for at least SETTLED_TIME takes it every time. One that is still
+## arriving - or was on the move - has not had time to set itself, so the ball is
+## only held on a roll of CATCH_CHANCE; the rest of the time it comes off the
+## player as a rebound.
+func _clean_catch() -> bool:
+	var dwell := 0.0
+	if player_dwell_provider.is_valid():
+		dwell = player_dwell_provider.call()
+	if dwell >= SETTLED_TIME:
+		return true
+	return randf() < CATCH_CHANCE
+
+
+## The ball hits the token and comes off it. The throw direction is reflected and
+## the ball keeps most of its pace, so it carries on away from the player and
+## stays live: it can still be chased, bounce out of the court for a miss, or
+## run out of steam and settle. REBOUND_LOCK keeps it uncontested for a moment so
+## it can clear the token's reach instead of being grabbed on the same frame.
+func _rebound() -> void:
+	_ball_vel = -_ball_vel * PLAYER_BOUNCE
+	_ball_vh = maxf(absf(_ball_vh) * BALL_RESTITUTION, BALL_MIN_BOUNCE * 1.5)
+	_rebound_lock = REBOUND_LOCK
+	_air_ratio = 0.0
+
+
+## Ends the feed. Out of bounds is reported to Main as a miss; otherwise the token
+## either took the ball on this bounce or the ball has settled on the floor.
+func _finish_feed(caught: bool, out_of_bounds: bool, cell: Vector2i) -> void:
 	_phase = Phase.REST
 	_timer = REST_TIME
-	_ball_ground = _flight_to
+	_indicator = false
+	_ball_vh = 0.0
+	_ball_vel = Vector2.ZERO
+	_ball_ground = Vector2(float(cell.x), float(cell.y))
 	_ball_height = 0.0
 	_air_ratio = 0.0
-	_indicator = false
-	var caught := false
-	if player_cell_provider.is_valid():
-		var pc: Vector2i = player_cell_provider.call()
-		caught = pc == _destination
-	throw_resolved.emit(caught, _destination)
+	if out_of_bounds:
+		ball_out_of_bounds.emit(cell)
+		return
+	throw_resolved.emit(caught, cell)
+
+
+## True when the token is standing close enough to `p` to take a bouncing ball.
+## Main reports the token's cell, so this compares the token's position with the
+## ball's actual landing point rather than cell against cell.
+func _token_is_at(p: Vector2) -> bool:
+	if not player_cell_provider.is_valid():
+		return false
+	var pc: Vector2i = player_cell_provider.call()
+	return Vector2(float(pc.x), float(pc.y)).distance_to(p) <= CATCH_RADIUS
+
+
+## The court cell a floor point falls in.
+func _floor_cell(p: Vector2) -> Vector2i:
+	return Vector2i(roundi(p.x), roundi(p.y))
+
+
+## True once the ball has touched down outside the court: past the bottom
+## transverse line (line y == GRID_MAX) or beyond the right side goal line
+## (line x == GRID_MAX). The left end is drawn open and the top line is the
+## coach's own, so neither of those counts.
+func _is_out_of_bounds(p: Vector2) -> bool:
+	return p.x > float(GRID_MAX) or p.y > float(GRID_MAX)
 
 
 ## A fresh throwing spot on the top line: never the spot already occupied, and
@@ -360,6 +493,12 @@ func ball_floor_logical() -> Vector2:
 ## The ball's on-screen position, lifted by the arc height.
 func ball_screen() -> Vector2:
 	return _to_screen(_ball_ground) - Vector2(0.0, _ball_height * _cell_px.y)
+
+
+## The court cell the ball's floor point is currently in: the landing cell while
+## it is bouncing, or where it settled once the feed has ended.
+func ball_cell() -> Vector2i:
+	return _floor_cell(_ball_ground)
 
 
 func phase_name() -> String:

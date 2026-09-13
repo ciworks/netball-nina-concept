@@ -14,10 +14,16 @@ var _debug_btn: Button
 var _grid_btn: Button
 var _reset_btn: Button
 var _scenario_btns: Array[Button] = []
+var _avatar: PlayerAvatar
 
 var _feedback_timer := 0.0
 var _rating_label: Label
 var _rating_tween: Tween
+
+## Player avatar box, pinned to the top-left corner. The control bar starts clear
+## of it so nothing overlaps as the viewport resizes.
+const AVATAR_MARGIN := 12.0
+const AVATAR_TOP := 10.0
 
 const SCENARIO_LABELS := ["A", "B", "C", "D", "E"]
 const SCENARIO_TIPS := [
@@ -98,6 +104,43 @@ func set_debug_panel_visible(visible: bool) -> void:
 		_debug_panel.visible = visible
 
 
+## --- Player avatar ----------------------------------------------------------
+## The avatar is the only place the player's face reacts to play. Main reports
+## what just happened in game terms and the avatar picks the expression; the
+## art itself lives in res://images/players/<player_name>/ (see avatar.gd).
+
+
+## Shows an expression by name: "default", "happy", "sad", "angry", "excited".
+## An expression with no art supplied yet falls back to the default image.
+func set_avatar_expression(expression: String) -> void:
+	if _avatar:
+		_avatar.set_expression(expression)
+
+
+## A catch was taken cleanly, which is the game's perfect catch: happy.
+func avatar_catch_made() -> void:
+	if _avatar:
+		_avatar.react_catch_made()
+
+
+## A catch was dropped: sad, or angry when it is the second one in a row.
+func avatar_catch_missed() -> void:
+	if _avatar:
+		_avatar.react_catch_missed()
+
+
+## A shot went in: excited.
+func avatar_shot_made() -> void:
+	if _avatar:
+		_avatar.react_shot_made()
+
+
+## A shot was missed: angry.
+func avatar_shot_missed() -> void:
+	if _avatar:
+		_avatar.react_shot_missed()
+
+
 ## Flashes a big kinetic rating word (PERFECT / GOOD / OK) in the center of
 ## the screen for about two seconds. Any previous rating is replaced.
 func flash_rating(word: String, color: Color) -> void:
@@ -156,10 +199,22 @@ func _build() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
 
-	# Top bar: scenarios left, status and toggles right.
+	# Player avatar, top-left corner: a rounded black-bordered box that reacts to
+	# the last catch or shot. It sits on the same ignore-only root as the rest of
+	# the HUD, so it never swallows a drag aimed at the court.
+	_avatar = PlayerAvatar.new()
+	_avatar.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_avatar.offset_left = AVATAR_MARGIN
+	_avatar.offset_top = AVATAR_TOP
+	_avatar.offset_right = AVATAR_MARGIN + PlayerAvatar.BOX_SIZE
+	_avatar.offset_bottom = AVATAR_TOP + PlayerAvatar.BOX_SIZE
+	root.add_child(_avatar)
+
+	# Top bar: scenarios left, status and toggles right. Its left edge clears the
+	# avatar so the scenario buttons never sit over the player's face.
 	var bar := HBoxContainer.new()
 	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	bar.offset_left = 10.0
+	bar.offset_left = AVATAR_MARGIN * 2.0 + PlayerAvatar.BOX_SIZE
 	bar.offset_right = -10.0
 	bar.offset_top = 8.0
 	bar.offset_bottom = 46.0

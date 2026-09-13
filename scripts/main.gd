@@ -1040,6 +1040,10 @@ func _complete_catch() -> void:
 	_successes += 1
 	player.set_pulse(false)
 	ui.set_phase_status("CAUGHT")
+	# The coach only reports a caught feed when the token took it cleanly (see
+	# CoachThrower._clean_catch), so reaching here is the perfect catch that the
+	# avatar reacts to.
+	ui.avatar_catch_made()
 	ui.show_message("Clean catch! Next feed incoming.", true)
 	ui.set_instruction("")
 	queue_redraw()
@@ -1058,6 +1062,9 @@ func _begin_loose_ball() -> void:
 	_loose_timer = LOOSE_BALL_TIME
 	player.set_pulse(true)
 	ui.set_phase_status("LOOSE BALL")
+	# The feed came down without being taken, so this is a missed catch: one in a
+	# row reads sad, two in a row tips the avatar over into angry.
+	ui.avatar_catch_missed()
 	ui.show_message("Feed not caught - chase the ball!", false)
 	ui.set_instruction("Drag onto the ball at (%d,%d) before it is lost." % [_loose_cell.x, _loose_cell.y])
 	queue_redraw()
@@ -1084,9 +1091,26 @@ func _feed_out_of_bounds() -> void:
 	_miss_timer = 1.4
 	player.set_pulse(false)
 	ui.set_phase_status("OUT OF BOUNDS")
+	# A feed that lands out of court was never taken, so it counts as a missed
+	# catch for the avatar.
+	ui.avatar_catch_missed()
 	ui.show_message("Feed out of bounds - miss.", false)
 	ui.set_instruction("")
 	queue_redraw()
+
+
+## --- Shot outcome seam -------------------------------------------------------
+## The avatar has a rule for shots - a perfect shot reads excited, a missed shot
+## reads angry - but this prototype has no shooting yet, so nothing calls this
+## today. When a shot exists, call it from wherever the shot is settled:
+## report_shot_result(true) for a perfect shot, report_shot_result(false) for a
+## miss. It routes through the same UI seam as the catches, so the avatar stays
+## the one place that owns the player's face.
+func report_shot_result(made: bool) -> void:
+	if made:
+		ui.avatar_shot_made()
+	else:
+		ui.avatar_shot_missed()
 
 
 ## Marks where the feed will land. It reads the coach's deterministic destination

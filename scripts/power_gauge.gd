@@ -10,11 +10,11 @@ extends Control
 ## range the player has to land in is a finer ask from further out.
 ##
 ## This is the display half of the mechanic only. Shooting does not exist in the
-## prototype yet, so nothing consumes power() and no shot is fired: the needle
-## sweeps by itself so the required range can be read against the current
-## distance. When a shot is added, whatever drives it should call set_power()
-## while charging and then ask in_accuracy_band() (or compare power() against
-## required_range()) to decide whether the shot was accurate.
+## prototype yet, so nothing consumes power() and no shot is fired: the player
+## holds the meter down to charge the needle and lets go to lock in the value
+## they selected. When a shot is added, the locked value is the power it was
+## given - ask in_accuracy_band() (or compare power() against required_range())
+## to decide whether the shot was accurate.
 ##
 ## The gauge never takes input. It floats over the middle of the court, and a
 ## Control that stopped touches there would swallow the drag strokes drawn across
@@ -50,8 +50,9 @@ const BAND_CENTER_FAR := 0.86
 const BAND_HALF_NEAR := 0.10
 const BAND_HALF_FAR := 0.04
 
-## How fast the preview needle sweeps the range, in power units per second.
-const SWEEP_SPEED := 1.25
+## How fast the needle climbs while the player holds it down, in power units per
+## second: a full-power hold takes just under a second.
+const CHARGE_SPEED := 1.15
 
 const PANEL_COLOR := Color(0.03, 0.10, 0.14, 0.74)
 const TRACK_COLOR := Color(0.05, 0.11, 0.16, 0.92)
@@ -71,7 +72,11 @@ var _band_lo := 0.0
 var _band_hi := 1.0
 ## Current needle position, 0..1 across the track.
 var _power := 0.0
-var _sweep_dir := 1.0
+## True while the player is holding the meter down: the needle only climbs then.
+var _charging := false
+## True once the player has released on a value: the needle is frozen on the
+## selection until the next hold starts.
+var _locked := false
 var _phase := 0.0
 
 # Cached styleboxes - the panel, the track, the power fill and the required range
@@ -99,16 +104,12 @@ func _process(delta: float) -> void:
 	if not visible:
 		return
 	_phase += delta
-	# Preview sweep. Nothing consumes the power value yet - the shot that will is
-	# not built - so the needle rides the full range on its own, which is what
-	# shows the player where the required band sits from where they are standing.
-	_power += _sweep_dir * SWEEP_SPEED * delta
-	if _power >= 1.0:
-		_power = 1.0
-		_sweep_dir = -1.0
-	elif _power <= 0.0:
-		_power = 0.0
-		_sweep_dir = 1.0
+	# Hold to charge. The needle climbs only while the player is holding the meter
+	# down, and letting go locks it. Nothing consumes the value yet - the shot
+	# that will is not built - so the lock is what makes a selection visible, and
+	# the required band stays drawn beside it so the value can be aimed at.
+	if _charging and not _locked:
+		_power = minf(_power + CHARGE_SPEED * delta, 1.0)
 	queue_redraw()
 
 
@@ -118,9 +119,35 @@ func set_active(on: bool) -> void:
 	visible = on
 	if on:
 		_power = 0.0
-		_sweep_dir = 1.0
+		_charging = false
+		_locked = false
 		_phase = 0.0
 	queue_redraw()
+
+
+## The player pressed down on the meter, so the needle starts a fresh climb from
+## zero: every hold reads the same way.
+func begin_charge() -> void:
+	_charging = true
+	_locked = false
+	_power = 0.0
+	queue_redraw()
+
+
+## The player let go, so the value the needle reached is the one they selected.
+## It stays put until the next hold. This is the moment a shot direction meter
+## belongs on screen (see main.gd).
+func release_charge() -> void:
+	if not _charging:
+		return
+	_charging = false
+	_locked = true
+	queue_redraw()
+
+
+## True once the player has released on a value, i.e. the selection is made.
+func is_locked() -> bool:
+	return _locked
 
 
 ## How far the token is from the post, in court cells. This is what sizes the
@@ -154,8 +181,8 @@ func in_accuracy_band() -> bool:
 	return _power >= _band_lo and _power <= _band_hi
 
 
-## Drives the needle from outside, for when the player's own charging replaces
-## the preview sweep.
+## Drives the needle from outside, for a shooting move that drives the value
+## itself instead of the player's hold.
 func set_power(value: float) -> void:
 	_power = clampf(value, 0.0, 1.0)
 	queue_redraw()
@@ -228,8 +255,10 @@ func _draw() -> void:
 	var base_y := GAUGE_SIZE.y - 13.0
 	var lo_pct := roundi(_band_lo * 100.0)
 	var hi_pct := roundi(_band_hi * 100.0)
-	draw_string(font, Vector2(TRACK_MARGIN, base_y),
-			"POWER %d%%" % roundi(_power * 100.0),
+	var power_txt := "POWER %d%%" % roundi(_power * 100.0)
+	if _locked:
+		power_txt = "LOCKED AT %d%%" % roundi(_power * 100.0)
+	draw_string(font, Vector2(TRACK_MARGIN, base_y), power_txt,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 14, TEXT_COLOR)
 	_draw_center(font, w * 0.5, base_y, "REQUIRED %d-%d%%" % [lo_pct, hi_pct], 14, TEXT_DIM)
 	_draw_right(font, w - TRACK_MARGIN, base_y,

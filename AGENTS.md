@@ -178,11 +178,21 @@ tracks as `_has_ball` and pushes out through `ui.set_power_gauge_visible()`.
   The mapping (which power band, how wide) lives in `power_gauge.gd` as
   `MIN/MAX_DISTANCE_CELLS`, `BAND_CENTER_NEAR/FAR` and `BAND_HALF_NEAR/FAR`:
   further out means more power and a narrower band.
-- Nothing consumes the meter yet. No shot is fired and no input is read: the
-  needle sweeps the range on its own (`SWEEP_SPEED`) so the band can be read
-  against the current distance, and `in_accuracy_band()` says whether the needle
-  sits inside it. A shot should call `set_power()`, judge with `power()` /
-  `required_range()` / `in_accuracy_band()`, then report through
+- Selecting a value is hold and release. The meter itself never reads input, so
+  `Main._unhandled_input()` watches the press and release: pressing while the
+  token holds the ball calls `_begin_power_charge()` (the needle charges from
+  zero under `CHARGE_SPEED`), and letting go calls `_release_power_charge()`,
+  which locks the value into `_selected_power` through `ui.power_gauge_power()`.
+  A press only charges when `_has_ball` is true and a drag only begins in
+  `READY`, so the two can never overlap.
+- Hold and release only ever sets a value. No shot is fired: the possession
+  clock keeps running down and still ends as a missed shot, so the selected
+  value is read by nothing but the debug line.
+- A value being selected is the trigger point for the shot direction meter,
+  which is not built yet (the reference art was never supplied). When it exists
+  it belongs in `_release_power_charge()`: the power is locked there, so a
+  direction is chosen against it. `in_accuracy_band()` says whether a locked
+  needle sits inside the required band, and a settled shot should report through
   `Main.report_shot_result(made)`.
 - The meter must stay `MOUSE_FILTER_IGNORE`. It hangs over the middle of the
   court, and a Control that stopped touches there would eat drag strokes drawn

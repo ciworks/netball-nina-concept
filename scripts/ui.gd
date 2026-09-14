@@ -151,10 +151,12 @@ func avatar_shot_missed() -> void:
 
 
 ## --- Shot power meter --------------------------------------------------------
-## Shown only while the token is holding the ball. Main owns both that state and
-## the distance the meter sizes its required range from; the meter itself - the
-## track, the sweeping needle and the required band - lives in power_gauge.gd.
-## It never takes input, so it cannot swallow a drag aimed at the court.
+## Shown only while the token is holding the ball. Main owns that state, the
+## distance the meter sizes its required range from, and the hold-and-release
+## that selects a value; the meter itself - the track, the charging needle and
+## the required band - lives in power_gauge.gd. The meter is
+## MOUSE_FILTER_IGNORE and never reads input itself, so it cannot swallow a drag
+## aimed at the court: Main reads the press and release and drives the meter.
 
 
 func set_power_gauge_visible(on: bool) -> void:
@@ -176,11 +178,37 @@ func power_gauge_required_range() -> Vector2:
 	return Vector2.ZERO
 
 
-## Drives the needle from outside, for a shooting move that charges its own
-## power instead of the meter's preview sweep.
+## Drives the needle from outside, for a shooting move that drives the value
+## itself instead of the player's hold.
 func set_power_gauge_power(value: float) -> void:
 	if _power_gauge:
 		_power_gauge.set_power(value)
+
+
+## The player pressed down on the meter, so the needle starts charging.
+func begin_power_charge() -> void:
+	if _power_gauge:
+		_power_gauge.begin_charge()
+
+
+## The player let go, so the value the needle reached is the selected power.
+func release_power_charge() -> void:
+	if _power_gauge:
+		_power_gauge.release_charge()
+
+
+## The power value the player has selected, 0..1. 0.0 before the meter exists.
+func power_gauge_power() -> float:
+	if _power_gauge:
+		return _power_gauge.power()
+	return 0.0
+
+
+## True once the player has released on a power value.
+func power_gauge_locked() -> bool:
+	if _power_gauge:
+		return _power_gauge.is_locked()
+	return false
 
 
 ## Flashes a big kinetic rating word (PERFECT / GOOD / OK) below the shot power

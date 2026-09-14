@@ -77,6 +77,9 @@ const COACH_SCRIPT := preload("res://scripts/coach.gd")
 
 ## Seconds the player has to reach a loose ball after a dropped feed.
 const LOOSE_BALL_TIME := 6.0
+## Instruction shown while the token holds the ball: what the shot power meter
+## asks of the player.
+const SHOT_HINT := "Hold to charge the shot power, release to set it."
 ## Seconds the route highlight and the rating beat hold after a clean catch. The
 ## round itself stays in COMPLETE for POSSESSION_TIME, because the token keeps
 ## the ball until the shot window closes.
@@ -159,6 +162,10 @@ var _has_ball := false
 ## Last visibility pushed to the power gauge, so the UI is only told when it
 ## actually changes rather than every frame.
 var _gauge_shown := false
+## The shot power value the player last selected by holding the meter down and
+## releasing, or -1.0 while nothing is selected. A shot will be judged on this
+## once shooting exists; the direction that pairs with it is not built yet.
+var _selected_power := -1.0
 
 
 func _ready() -> void:
@@ -220,12 +227,19 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Holding the ball turns a press into a power charge and its release into a
+	# selection, so the meter is driven by the same press the drag uses. The two
+	# can never overlap: a drag only starts in READY, and possession is COMPLETE.
 	if event is InputEventScreenTouch:
 		if event.pressed:
-			if state == State.READY and _near_player(event.position):
+			if _has_ball:
+				_begin_power_charge()
+			elif state == State.READY and _near_player(event.position):
 				_begin_drag(event.index, event.position)
 		else:
-			if _active_drag == event.index and state == State.DRAWING:
+			if _has_ball:
+				_release_power_charge()
+			elif _active_drag == event.index and state == State.DRAWING:
 				_end_drag()
 	elif event is InputEventScreenDrag:
 		if _active_drag == event.index and state == State.DRAWING:
@@ -233,11 +247,15 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
-				if state == State.READY and _near_player(event.position):
+				if _has_ball:
+					_begin_power_charge()
+				elif state == State.READY and _near_player(event.position):
 					_mouse_dragging = true
 					_begin_drag(-1, event.position)
 			else:
-				if _mouse_dragging:
+				if _has_ball:
+					_release_power_charge()
+				elif _mouse_dragging:
 					_mouse_dragging = false
 					if state == State.DRAWING:
 						_end_drag()
@@ -431,7 +449,7 @@ func _finish_movement() -> void:
 		_successes += 1
 		ui.set_status("COMPLETE")
 		ui.show_message("Ball collected!", true)
-		ui.set_instruction("Court cleared - next feed loading.")
+		ui.set_instruction(SHOT_HINT)
 		queue_redraw()
 		return
 	# The feed has not been settled yet, so a walk that fell short is not the end
@@ -1023,6 +1041,9 @@ func _start_coach_round() -> void:
 	# The ball goes back to the coach for this feed, so the token no longer
 	# holds it and the shot power meter has nothing to show until the next catch.
 	_has_ball = false
+	# A new feed means a new possession to come, so the value selected last time
+	# is gone.
+	_selected_power = -1.0
 	_feed_count += 1
 	if coach != null:
 		coach.start_round(target_cell)
@@ -1105,7 +1126,7 @@ func _complete_catch() -> void:
 	# avatar reacts to.
 	ui.avatar_catch_made()
 	ui.show_message("Clean catch! Next feed incoming.", true)
-	ui.set_instruction("")
+	ui.set_instruction(SHOT_HINT)
 	queue_redraw()
 
 
@@ -1214,6 +1235,28 @@ func _sync_power_gauge() -> void:
 		ui.set_power_gauge_distance(_distance_to_post_cells())
 
 
+## The player pressed down while holding the ball, so the meter starts charging
+## the needle from zero. Pressing again during the same possession restarts it.
+func _begin_power_charge() -> void:
+	if not _has_ball:
+		return
+	ui.begin_power_charge()
+	ui.set_instruction(SHOT_HINT)
+
+
+## The player let go, so the value the needle reached is the power they selected.
+## This is where the shot direction meter belongs once its own design is settled:
+## the power is locked and a direction would be chosen against it. Nothing fires
+## yet - the shot itself is still not built - so the possession window goes on
+## running down and still ends as a missed shot.
+func _release_power_charge() -> void:
+	if not _has_ball:
+		return
+	ui.release_power_charge()
+	_selected_power = ui.power_gauge_power()
+	ui.set_instruction("Shot power set at %d%%." % roundi(_selected_power * 100.0))
+
+
 ## Straight-line distance from the token to the post, in court cells. Corner to
 ## corner is about 14.1 cells, which is what the meter's range is scaled from.
 func _distance_to_post_cells() -> float:
@@ -1225,9 +1268,14 @@ func _power_debug_text() -> String:
 	if not _has_ball:
 		return "no ball"
 	var band: Vector2 = ui.power_gauge_required_range()
-	return "holding %.1f cells, need %d-%d%%, %.1fs left" % [
+	# The selected value only exists after a hold-and-release, so it reads "-"
+	# until the player has chosen one.
+	var shot_txt := ", shot -"
+	if _selected_power >= 0.0:
+		shot_txt = ", shot %d%%" % roundi(_selected_power * 100.0)
+	return "holding %.1f cells, need %d-%d%%, %.1fs left%s" % [
 		_distance_to_post_cells(), roundi(band.x * 100.0), roundi(band.y * 100.0),
-		maxf(_complete_timer, 0.0)]
+		maxf(_complete_timer, 0.0), shot_txt]
 
 
 ## True while the token is holding the ball.

@@ -15,6 +15,7 @@ var _grid_btn: Button
 var _reset_btn: Button
 var _scenario_btns: Array[Button] = []
 var _avatar: PlayerAvatar
+var _power_gauge: PowerGauge
 
 var _feedback_timer := 0.0
 var _rating_label: Label
@@ -95,7 +96,8 @@ func set_debug(info: Dictionary) -> void:
 	if int(info.get("extra", -1)) >= 0:
 		extra_txt = "+%d over optimal" % int(info["extra"])
 	txt += "Optimality Gap: %s\n" % extra_txt
-	txt += "Coach: %s" % info.get("coach", "-")
+	txt += "Coach: %s\n" % info.get("coach", "-")
+	txt += "Shot: %s" % info.get("shot", "-")
 	_debug_label.text = txt
 
 
@@ -139,6 +141,39 @@ func avatar_shot_made() -> void:
 func avatar_shot_missed() -> void:
 	if _avatar:
 		_avatar.react_shot_missed()
+
+
+## --- Shot power meter --------------------------------------------------------
+## Shown only while the token is holding the ball. Main owns both that state and
+## the distance the meter sizes its required range from; the meter itself - the
+## track, the sweeping needle and the required band - lives in power_gauge.gd.
+## It never takes input, so it cannot swallow a drag aimed at the court.
+
+
+func set_power_gauge_visible(on: bool) -> void:
+	if _power_gauge:
+		_power_gauge.set_active(on)
+
+
+func set_power_gauge_distance(cells: float) -> void:
+	if _power_gauge:
+		_power_gauge.set_distance_cells(cells)
+
+
+## The range of needle positions that would be an accurate shot at the distance
+## the meter is currently reading, as a (low, high) pair in 0..1. Vector2.ZERO
+## before the meter has been built.
+func power_gauge_required_range() -> Vector2:
+	if _power_gauge:
+		return _power_gauge.required_range()
+	return Vector2.ZERO
+
+
+## Drives the needle from outside, for a shooting move that charges its own
+## power instead of the meter's preview sweep.
+func set_power_gauge_power(value: float) -> void:
+	if _power_gauge:
+		_power_gauge.set_power(value)
 
 
 ## Flashes a big kinetic rating word (PERFECT / GOOD / OK) in the center of
@@ -336,6 +371,27 @@ func _build() -> void:
 	_debug_label.add_theme_font_size_override("font_size", 13)
 	_debug_label.add_theme_color_override("font_color", Color(0.85, 1.0, 0.95, 1.0))
 	_debug_panel.add_child(_debug_label)
+
+	# Shot power meter, floating in the middle of the screen. It is the last child
+	# on this ignore-only root, so it sits over the rest of the HUD without ever
+	# taking a touch: a drag across the middle of the court still reaches the
+	# game. It starts hidden because Main shows it only while the token holds the
+	# ball (see set_power_gauge_visible).
+	_power_gauge = PowerGauge.new()
+	_power_gauge.name = "PowerGauge"
+	# Anchored to the exact centre and pulled back by half its own size, so it
+	# stays centred on the whole screen at any viewport size.
+	var gauge_size := PowerGauge.GAUGE_SIZE
+	_power_gauge.anchor_left = 0.5
+	_power_gauge.anchor_top = 0.5
+	_power_gauge.anchor_right = 0.5
+	_power_gauge.anchor_bottom = 0.5
+	_power_gauge.offset_left = -gauge_size.x * 0.5
+	_power_gauge.offset_top = -gauge_size.y * 0.5
+	_power_gauge.offset_right = gauge_size.x * 0.5
+	_power_gauge.offset_bottom = gauge_size.y * 0.5
+	root.add_child(_power_gauge)
+	_power_gauge.set_active(false)
 
 
 func _make_button(text: String) -> Button:

@@ -6,6 +6,7 @@
 [ext_resource type="Script" uid="uid://b2wer5ahta0t6" path="res://scripts/court.gd" id="4_court"]
 [ext_resource type="TileSet" uid="uid://bg31wj3jfoqgf" path="res://tiles/court_tileset.tres" id="5_tileset"]
 [ext_resource type="SpriteFrames" uid="uid://ws4pwme02nlb" path="res://images/player_frames.tres" id="6_frames"]
+[ext_resource type="Texture2D" uid="uid://dge0okvxpc3ew" path="res://images/netball_post.png" id="7_272bh"]
 
 [node name="Main" type="Node2D" unique_id=1529178230]
 script = ExtResource("1_main")
@@ -36,3 +37,7 @@ tile_set = ExtResource("5_tileset")
 [node name="CourtRoute" type="TileMapLayer" parent="CourtRig" unique_id=1962410156]
 z_index = -1
 script = ExtResource("4_court")
+
+[node name="GoalPost" type="Sprite2D" parent="." unique_id=1037781015]
+z_index = 5
+texture = ExtResource("7_272bh")

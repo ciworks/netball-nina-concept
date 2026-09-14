@@ -49,6 +49,17 @@ const RATING_PERFECT_COLOR := Color(1.0, 0.85, 0.2, 1.0)
 const RATING_GOOD_COLOR := Color(0.32, 0.9, 0.52, 1.0)
 const RATING_OK_COLOR := Color(1.0, 0.62, 0.25, 1.0)
 
+## How tall the netball post stands, measured in court cells the same way the
+## token's CELL_FILL is, so the post keeps its height relative to the player at
+## every viewport size. A netball post is roughly three metres to the player's
+## one and a half, so it stands about twice as tall as the token art.
+const POST_HEIGHT_CELLS := 2.0
+
+## The cell the post stands on: the middle of the right goal line, which is the
+## line a feed is out past (logical x > GRID_MAX) and where a shot will be aimed
+## once shooting exists.
+const POST_CELL := Vector2i(GRID_MAX, 5)
+
 const SCENARIOS := [
 	{"name": "A - Horizontal", "player": Vector2i(2, 5), "target": Vector2i(8, 5)},
 	{"name": "B - Vertical", "player": Vector2i(5, 8), "target": Vector2i(5, 2)},
@@ -74,6 +85,7 @@ const CATCH_COMPLETE_TIME := 1.6
 @onready var court_markings: TileMapLayer = $CourtRig/CourtMarkings
 @onready var court_route: CourtBoard = $CourtRig/CourtRoute
 @onready var court_rig: Node2D = $CourtRig
+@onready var goal_post: Sprite2D = $GoalPost
 
 ## Top-line coach feeding the ball. Built in code (see _create_coach) so the
 ## placeholder sprite needs no scene node and no texture file.
@@ -132,6 +144,15 @@ var _loose_cell := Vector2i.ZERO
 var _loose_timer := 0.0
 var _feed_count := 0
 
+## True while the token is holding the ball: from a clean catch or a collected
+## loose ball until the coach takes the ball back for the next feed. This is the
+## window the shot power meter is shown in - the player only owns the ball then,
+## and shooting does not exist yet, so nothing else reads it.
+var _has_ball := false
+## Last visibility pushed to the power gauge, so the UI is only told when it
+## actually changes rather than every frame.
+var _gauge_shown := false
+
 
 func _ready() -> void:
 	_recompute_layout()
@@ -181,6 +202,7 @@ func _process(delta: float) -> void:
 		if _loose_timer <= 0.0:
 			_lose_loose_ball()
 	_resolve_pending_throw()
+	_sync_power_gauge()
 	queue_redraw()
 
 
@@ -387,6 +409,9 @@ func _finish_movement() -> void:
 	# feed is over the ball sits wherever it came to rest, so it is the ball's real
 	# position - not the cell the throw was aimed at - that has to be reached.
 	if player_cell == _collect_cell() and _ball_released() and not _feed_airborne():
+		# The token is on the loose ball, so it now holds it: the shot power
+		# meter is up for as long as this possession lasts.
+		_has_ball = true
 		state = State.COMPLETE
 		_complete_timer = 1.8
 		highlight_timer = 1.8
@@ -597,6 +622,21 @@ func _recompute_layout() -> void:
 		# its origin is court_rect.position (not the half-cell-back panel origin
 		# the tile layers use) and a spot of (x, 0) lands on the top line.
 		coach.layout(court_rect.position, Vector2(cell_w, cell_h), _project_point)
+	if goal_post != null:
+		# The post is a scene node, not generated art, and stays upright in screen
+		# space the same way the token and the ball do - so only its scale follows
+		# the court. Its base sits on its cell and its art is scaled so the whole
+		# post is POST_HEIGHT_CELLS tall, which keeps it the same height next to
+		# the player however the viewport resizes.
+		goal_post.position = grid_to_screen(POST_CELL)
+		var post_tex := goal_post.texture
+		if post_tex != null and post_tex.get_height() > 0:
+			var tex_h := float(post_tex.get_height())
+			goal_post.scale = Vector2.ONE * (float(cell_h) * POST_HEIGHT_CELLS / tex_h)
+			# A centered sprite is drawn around its origin, so lift the art by half
+			# its height to sit its feet on the origin - i.e. on the goal line
+			# rather than straddling it.
+			goal_post.offset = Vector2(0.0, -tex_h * 0.5)
 
 
 func _on_viewport_resized() -> void:
@@ -765,6 +805,7 @@ func _push_debug() -> void:
 		"extra": extra,
 		"segments": segments,
 		"coach": _coach_debug_text(),
+		"shot": _power_debug_text(),
 	})
 
 
@@ -966,6 +1007,9 @@ func _start_coach_round() -> void:
 	_ball_out = false
 	_ball_loose = false
 	_loose_timer = 0.0
+	# The ball goes back to the coach for this feed, so the token no longer
+	# holds it and the shot power meter has nothing to show until the next catch.
+	_has_ball = false
 	_feed_count += 1
 	if coach != null:
 		coach.start_round(target_cell)
@@ -1029,6 +1073,9 @@ func _collect_cell() -> Vector2i:
 func _complete_catch() -> void:
 	_throw_pending = false
 	_ball_loose = false
+	# The feed was taken, so the token holds the ball from here until the coach
+	# takes it back: that possession is what the shot power meter is up for.
+	_has_ball = true
 	# Rate the route the token actually walked. A catch made without moving - the
 	# token was already set on the spot waiting - has no route to judge, so nothing
 	# flashes in that case.
@@ -1111,6 +1158,61 @@ func report_shot_result(made: bool) -> void:
 		ui.avatar_shot_made()
 	else:
 		ui.avatar_shot_missed()
+
+
+## --- Shot power meter ---------------------------------------------------------
+## The meter is the display half of a shot the prototype does not have yet: it
+## comes up while the token holds the ball, and the range it asks for is sized
+## from how far the token stands from the post at POST_CELL - stood under the
+## post wants little power, a shot from the far end wants nearly all of it.
+## Nothing consumes the power value: no input is read and no shot is fired, so
+## the gauge sweeps its own needle and this only keeps it in step with
+## possession and distance. A future shooting move should drive the needle with
+## set_shot_power(), judge the result with shot_power_required_range() and
+## report it through report_shot_result(made) above.
+
+
+## Keeps the meter in step with the round. Pushed every frame because the token
+## can still be walking its route while it holds the ball; the gauge itself skips
+## the work when the distance has not changed.
+func _sync_power_gauge() -> void:
+	if _has_ball != _gauge_shown:
+		_gauge_shown = _has_ball
+		ui.set_power_gauge_visible(_has_ball)
+	if _has_ball:
+		ui.set_power_gauge_distance(_distance_to_post_cells())
+
+
+## Straight-line distance from the token to the post, in court cells. Corner to
+## corner is about 14.1 cells, which is what the meter's range is scaled from.
+func _distance_to_post_cells() -> float:
+	return (Vector2(player_cell) - Vector2(POST_CELL)).length()
+
+
+## One line of shot state for the developer debug panel.
+func _power_debug_text() -> String:
+	if not _has_ball:
+		return "no ball"
+	var band: Vector2 = ui.power_gauge_required_range()
+	return "holding %.1f cells, need %d-%d%%" % [
+		_distance_to_post_cells(), roundi(band.x * 100.0), roundi(band.y * 100.0)]
+
+
+## True while the token is holding the ball.
+func has_ball() -> bool:
+	return _has_ball
+
+
+## The power range an accurate shot needs from the token's current cell, as a
+## (low, high) pair in 0..1.
+func shot_power_required_range() -> Vector2:
+	return ui.power_gauge_required_range()
+
+
+## Drives the needle from outside, for a shooting move that charges its own
+## power instead of the meter's preview sweep.
+func set_shot_power(value: float) -> void:
+	ui.set_power_gauge_power(value)
 
 
 ## Marks where the feed will land. It reads the coach's deterministic destination

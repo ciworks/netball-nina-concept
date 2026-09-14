@@ -77,8 +77,15 @@ const COACH_SCRIPT := preload("res://scripts/coach.gd")
 
 ## Seconds the player has to reach a loose ball after a dropped feed.
 const LOOSE_BALL_TIME := 6.0
-## Seconds the caught state holds before the next feed is set up.
+## Seconds the route highlight and the rating beat hold after a clean catch. The
+## round itself stays in COMPLETE for POSSESSION_TIME, because the token keeps
+## the ball until the shot window closes.
 const CATCH_COMPLETE_TIME := 1.6
+## Seconds the token holds the ball after taking a feed: the window the shot
+## power meter is up for. Letting it run out without a shot is a missed shot and
+## the coach feeds the next ball, so every possession resolves even though
+## shooting itself is not built yet.
+const POSSESSION_TIME := 3.0
 
 @onready var player = $Player
 @onready var ui: CanvasLayer = $UI
@@ -182,7 +189,13 @@ func _process(delta: float) -> void:
 		State.COMPLETE:
 			_complete_timer -= delta
 			if _complete_timer <= 0.0:
-				_advance_after_success()
+				if _has_ball:
+					# The token still holds the ball, so this clock was not
+					# waiting on the catch - it was holding the shot window open
+					# and the shot never came.
+					_shot_window_expired()
+				else:
+					_advance_after_success()
 		State.MISS:
 			_miss_timer -= delta
 			if _miss_timer <= 0.0:
@@ -413,7 +426,7 @@ func _finish_movement() -> void:
 		# meter is up for as long as this possession lasts.
 		_has_ball = true
 		state = State.COMPLETE
-		_complete_timer = 1.8
+		_complete_timer = POSSESSION_TIME
 		highlight_timer = 1.8
 		_successes += 1
 		ui.set_status("COMPLETE")
@@ -1082,7 +1095,7 @@ func _complete_catch() -> void:
 	if committed_route.size() >= 2:
 		_show_route_rating(committed_route)
 	state = State.COMPLETE
-	_complete_timer = CATCH_COMPLETE_TIME
+	_complete_timer = POSSESSION_TIME
 	highlight_timer = CATCH_COMPLETE_TIME
 	_successes += 1
 	player.set_pulse(false)
@@ -1146,6 +1159,24 @@ func _feed_out_of_bounds() -> void:
 	queue_redraw()
 
 
+## The shot window ran out with no shot taken, so this possession is classed as a
+## missed shot and the coach feeds the next ball. It settles through the same
+## miss beat as a lost loose ball, and reports the miss through
+## report_shot_result() so the avatar reacts now exactly as it will to a real
+## missed shot: adding shooting later only means calling this from the shot
+## instead of from the clock.
+func _shot_window_expired() -> void:
+	_has_ball = false
+	report_shot_result(false)
+	state = State.MISS
+	_miss_timer = 1.2
+	player.set_pulse(false)
+	ui.set_phase_status("NO SHOT - MISS")
+	ui.show_message("No shot taken - missed.", false)
+	ui.set_instruction("")
+	queue_redraw()
+
+
 ## --- Shot outcome seam -------------------------------------------------------
 ## The avatar has a rule for shots - a perfect shot reads excited, a missed shot
 ## reads angry - but this prototype has no shooting yet, so nothing calls this
@@ -1194,8 +1225,9 @@ func _power_debug_text() -> String:
 	if not _has_ball:
 		return "no ball"
 	var band: Vector2 = ui.power_gauge_required_range()
-	return "holding %.1f cells, need %d-%d%%" % [
-		_distance_to_post_cells(), roundi(band.x * 100.0), roundi(band.y * 100.0)]
+	return "holding %.1f cells, need %d-%d%%, %.1fs left" % [
+		_distance_to_post_cells(), roundi(band.x * 100.0), roundi(band.y * 100.0),
+		maxf(_complete_timer, 0.0)]
 
 
 ## True while the token is holding the ball.

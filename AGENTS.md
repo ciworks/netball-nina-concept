@@ -95,6 +95,10 @@ Public surface of `main.gd`: `random_test()`, `load_scenario(index)`,
      running out of time is a `MISS`.
    - Landed outside the court: `_feed_out_of_bounds()`, a `MISS`.
    - Both miss paths feed the avatar: one drop is sad, two in a row is angry.
+7. A clean catch or a collected loose ball puts the token in possession: the shot
+   power meter comes up for `POSSESSION_TIME` (3.0s). Shooting is not built, so
+   the window simply runs out, which is classed as a missed shot
+   (`_shot_window_expired()`) and the coach feeds the next ball.
 
 `State` is the round machine: `READY, DRAWING, COMMITTED, MOVING, COMPLETE,
 INVALID, MISS`.
@@ -123,6 +127,9 @@ INVALID, MISS`.
   so the verdict is shown after the movement finishes, not during it.
 - Every feed resolves exactly once, through either the loose-ball path or the
   out-of-bounds path.
+- A possession always resolves too. Once the token holds the ball the round is
+  in `COMPLETE` on the shot clock, and the clock running out is a missed shot -
+  the ball goes back to the coach either way.
 
 ## Avatar reactions
 
@@ -143,9 +150,11 @@ Main speaks in game terms and the avatar picks the face:
 `ui.avatar_catch_made()`, `ui.avatar_catch_missed()`, `ui.avatar_shot_made()`,
 `ui.avatar_shot_missed()`.
 
-Shots do not exist in the prototype yet, so nothing triggers the two shot
-reactions. `Main.report_shot_result(made)` is the seam: call it with `true` for
-a perfect shot and `false` for a miss once a shooting move exists.
+Shooting does not exist in the prototype yet, so nothing triggers `excited` - but
+the missed-shot reaction is live: a possession whose 3 second window runs out
+without a shot is a miss, and `_shot_window_expired()` reports it. Main's
+`report_shot_result(made)` is the seam: call it with `true` for a perfect shot
+and `false` for a miss once a shooting move exists.
 
 ## Shot power meter
 
@@ -156,9 +165,14 @@ tracks as `_has_ball` and pushes out through `ui.set_power_gauge_visible()`.
 
 - Possession starts on a clean catch (`_complete_catch()`) or on collecting a
   loose ball (the collect branch of `_finish_movement()`), and ends when the
-  coach takes the ball back for the next feed (`_start_coach_round()`). That is
-  the same window the round already spends in `State.COMPLETE`, so until shooting
-  exists the meter is up for `CATCH_COMPLETE_TIME` (1.6s) after a catch.
+  coach takes the ball back for the next feed (`_start_coach_round()`).
+- The window is `POSSESSION_TIME` (3.0s), and it is the round's `State.COMPLETE`
+  timer, so the meter stays up for 3 seconds once it appears. Letting it run out
+  without a shot is classed as a missed shot: `_shot_window_expired()` reports it
+  through `report_shot_result(false)` (the avatar goes angry) and settles through
+  the normal `MISS` beat, which hands the next feed to the coach.
+- `CATCH_COMPLETE_TIME` (1.6s) now only governs the route highlight and the
+  rating beat, not the length of the possession.
 - The required range is sized from `Main.distance_to_post_cells()` - the
   straight-line distance from the token's cell to `POST_CELL`, in court cells.
   The mapping (which power band, how wide) lives in `power_gauge.gd` as
@@ -209,7 +223,8 @@ tracks as `_has_ball` and pushes out through `ui.set_power_gauge_visible()`.
 ## Known gaps and placeholder art
 
 - No shooting mechanic. See the `report_shot_result` seam above, and the shot
-  power meter section for the power half of it.
+  power meter section for the power half of it. The possession window and its
+  expiry-as-a-miss are the only shot handling that exists.
 - The coach and the ball are drawn from primitives in `coach.gd` `_draw()`.
   Swap in real art when it exists.
 - The token's animations come from `res://images/player_frames.tres`; `player.gd`

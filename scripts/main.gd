@@ -162,6 +162,9 @@ var _has_ball := false
 ## Last visibility pushed to the power gauge, so the UI is only told when it
 ## actually changes rather than every frame.
 var _gauge_shown := false
+## Last visibility pushed to the shot direction meter, which only appears once a
+## power value has been selected.
+var _direction_shown := false
 ## The shot power value the player last selected by holding the meter down and
 ## releasing, or -1.0 while nothing is selected. A shot will be judged on this
 ## once shooting exists; the direction that pairs with it is not built yet.
@@ -1233,6 +1236,15 @@ func _sync_power_gauge() -> void:
 		ui.set_power_gauge_visible(_has_ball)
 	if _has_ball:
 		ui.set_power_gauge_distance(_distance_to_post_cells())
+	# The direction meter appears only once a power value has been selected, and
+	# it tracks the token while it still holds the ball: the optimal direction is
+	# measured from wherever the token is standing, and it can still be walking.
+	var direction_shown := _has_ball and _selected_power >= 0.0
+	if direction_shown != _direction_shown:
+		_direction_shown = direction_shown
+		ui.set_direction_gauge_visible(direction_shown)
+	if direction_shown:
+		ui.set_direction_gauge_optimal(_optimal_direction_t())
 
 
 ## The player pressed down while holding the ball, so the meter starts charging
@@ -1244,23 +1256,44 @@ func _begin_power_charge() -> void:
 	ui.set_instruction(SHOT_HINT)
 
 
-## The player let go, so the value the needle reached is the power they selected.
-## This is where the shot direction meter belongs once its own design is settled:
-## the power is locked and a direction would be chosen against it. Nothing fires
-## yet - the shot itself is still not built - so the possession window goes on
-## running down and still ends as a missed shot.
+## The player let go, so the value the needle reached is the power they selected
+## and the shot direction meter comes up against it: a direction is chosen
+## against a power that is already locked. Nothing fires yet - the shot itself is
+## still not built - so the possession window goes on running down and still ends
+## as a missed shot.
 func _release_power_charge() -> void:
 	if not _has_ball:
 		return
 	ui.release_power_charge()
 	_selected_power = ui.power_gauge_power()
-	ui.set_instruction("Shot power set at %d%%." % roundi(_selected_power * 100.0))
+	ui.set_direction_gauge_optimal(_optimal_direction_t())
+	ui.set_instruction("Shot power set at %d%% - choose a direction." % roundi(_selected_power * 100.0))
 
 
 ## Straight-line distance from the token to the post, in court cells. Corner to
 ## corner is about 14.1 cells, which is what the meter's range is scaled from.
 func _distance_to_post_cells() -> float:
 	return (Vector2(player_cell) - Vector2(POST_CELL)).length()
+
+
+## Where the best shot direction sits on the direction dial, 0 = dial left end and
+## 1 = dial right end. It is the direction from the token to the post, read in
+## screen space: the court is drawn in the 3/4 projection, so the dial has to
+## read the projected direction the player can actually see, not the logical grid
+## one. The dial sweeps the upper half of the screen's directions, so a post
+## straight out to the right of the token lands at the dial's right end, one
+## straight up the screen lands mid-dial, and one to the left lands at the left
+## end. A post below the token has no place on the upper half of the dial, so it
+## clamps to the nearest end.
+func _optimal_direction_t() -> float:
+	var v: Vector2 = grid_to_screen(POST_CELL) - player.position
+	if v.length() < 0.001:
+		return 0.5
+	# Screen angle: 0 deg points right, -90 deg points up the screen. The dial
+	# runs from pointing left (-180 deg) through pointing up to pointing right, so
+	# that half turn maps straight onto 0..1 across the dial.
+	var deg := rad_to_deg(atan2(v.y, v.x))
+	return clampf((deg + 180.0) / 180.0, 0.0, 1.0)
 
 
 ## One line of shot state for the developer debug panel.
@@ -1272,7 +1305,10 @@ func _power_debug_text() -> String:
 	# until the player has chosen one.
 	var shot_txt := ", shot -"
 	if _selected_power >= 0.0:
-		shot_txt = ", shot %d%%" % roundi(_selected_power * 100.0)
+		var valid: Vector2 = ui.direction_gauge_valid_range()
+		shot_txt = ", shot %d%%, dir %d-%d%%" % [
+			roundi(_selected_power * 100.0),
+			roundi(valid.x * 100.0), roundi(valid.y * 100.0)]
 	return "holding %.1f cells, need %d-%d%%, %.1fs left%s" % [
 		_distance_to_post_cells(), roundi(band.x * 100.0), roundi(band.y * 100.0),
 		maxf(_complete_timer, 0.0), shot_txt]

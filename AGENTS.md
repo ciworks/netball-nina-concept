@@ -66,6 +66,7 @@ so it needs no texture and no scene entry.
 | `scripts/ui.gd` | none | Builds the entire HUD in `_build()` and exposes setters. Owns the avatar widget. |
 | `scripts/avatar.gd` | `PlayerAvatar` | The reacting face box in the top-left corner. |
 | `scripts/power_gauge.gd` | `PowerGauge` | Floating shot-power meter, shown only while the token holds the ball. |
+| `scripts/direction_gauge.gd` | `DirectionGauge` | Shot direction dial, revealed once a power value is selected. |
 | `scripts/player.gd` | `PlayerToken` | Passive token. Main writes its position and state; it draws shadow, move ring and cell label. |
 | `scripts/coach.gd` | `CoachThrower` | The feed: pick spot, hold, windup, release, projectile flight, bounce, verdict. |
 | `scripts/court.gd` | `CourtBoard` | Route highlight overlay. Merges selected cells into one band. |
@@ -188,15 +189,44 @@ tracks as `_has_ball` and pushes out through `ui.set_power_gauge_visible()`.
 - Hold and release only ever sets a value. No shot is fired: the possession
   clock keeps running down and still ends as a missed shot, so the selected
   value is read by nothing but the debug line.
-- A value being selected is the trigger point for the shot direction meter,
-  which is not built yet (the reference art was never supplied). When it exists
-  it belongs in `_release_power_charge()`: the power is locked there, so a
-  direction is chosen against it. `in_accuracy_band()` says whether a locked
-  needle sits inside the required band, and a settled shot should report through
-  `Main.report_shot_result(made)`.
+- Selecting a value raises the shot direction meter (see the next section): the
+  power is locked on release, so a direction is chosen against a settled power.
+  `in_accuracy_band()` says whether a locked needle sits inside the required
+  band, and a settled shot should report through `Main.report_shot_result(made)`.
 - The meter must stay `MOUSE_FILTER_IGNORE`. It hangs over the middle of the
   court, and a Control that stopped touches there would eat drag strokes drawn
   across the screen (hard rule 4).
+
+## Shot direction meter
+
+`scripts/direction_gauge.gd` (`DirectionGauge`) is a semicircular dial, built in
+code by `ui.gd` on the same ignore-only root as the rest of the HUD. It is the
+direction half of a shot, the way the power meter is the strength half, and it is
+built to the supplied reference art.
+
+- The art it follows: a flat grey outer track, a coloured band inside it, and a
+  dark needle turning on a hub at the bottom centre.
+- The needle position is a direction across the upper half of the screen: dial
+  left is aimed left, dial middle is straight up the screen, dial right is aimed
+  right. It reads in screen space because it has to match the direction the
+  player can actually see in the 3/4 projection.
+- The optimal direction is owned by Main (`_optimal_direction_t()`): the
+  direction from the token's screen position to `grid_to_screen(POST_CELL)`,
+  mapped onto 0..1 across the dial. A post below the token clamps to the nearest
+  end, because the dial only covers the upper half of the screen.
+- Green is a valid shot and red is out of bounds. The green arc spans
+  `DIRECTION_TOLERANCE` (0.05) either side of the optimal direction - 5% each
+  way, which over the dial's 180 degree sweep is 9 degrees either way.
+- It appears once a power value has been selected, because a direction is chosen
+  against a settled power. `_release_power_charge()` locks the power and then
+  raises the dial, and `_sync_power_gauge()` keeps the optimal direction in step
+  while it is up. It hides again at the next feed.
+- Nothing moves the needle yet and no shot is fired, so it sweeps the dial by
+  itself (`SWEEP_SPEED`) to show where the green range sits. A direction move
+  should call `set_direction()` and judge with `in_valid_range()` or
+  `valid_range()`, then report through `Main.report_shot_result(made)`.
+- It must stay `MOUSE_FILTER_IGNORE`, like every other floating HUD node: a
+  Control that stopped touches over the court would eat drag strokes (hard rule 4).
 
 ## Common change recipes
 
@@ -232,9 +262,12 @@ tracks as `_has_ball` and pushes out through `ui.set_power_gauge_visible()`.
 
 ## Known gaps and placeholder art
 
-- No shooting mechanic. See the `report_shot_result` seam above, and the shot
-  power meter section for the power half of it. The possession window and its
-  expiry-as-a-miss are the only shot handling that exists.
+- Still no shooting mechanic: nothing fires, and the possession window's
+  expiry-as-a-miss is the only shot outcome that exists. Both halves of the aim
+  are built and wired (the power meter and the direction dial), so the missing
+  piece is a trigger that reads `power()` / `direction()` against
+  `required_range()` and `valid_range()` and reports through
+  `Main.report_shot_result(made)`.
 - The coach and the ball are drawn from primitives in `coach.gd` `_draw()`.
   Swap in real art when it exists.
 - The token's animations come from `res://images/player_frames.tres`; `player.gd`

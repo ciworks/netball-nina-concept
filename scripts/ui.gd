@@ -16,6 +16,7 @@ var _reset_btn: Button
 var _scenario_btns: Array[Button] = []
 var _avatar: PlayerAvatar
 var _power_gauge: PowerGauge
+var _direction_gauge: DirectionGauge
 
 var _feedback_timer := 0.0
 var _rating_label: Label
@@ -209,6 +210,32 @@ func power_gauge_locked() -> bool:
 	if _power_gauge:
 		return _power_gauge.is_locked()
 	return false
+
+
+## --- Shot direction meter ----------------------------------------------------
+## Revealed once the player has locked a power value, because a direction is
+## chosen against a settled power, and hidden again at the next feed. Main owns
+## the optimal direction - it is the direction from the token to the goal post -
+## and the dial itself lives in direction_gauge.gd. Like the rest of the HUD it
+## never takes input.
+
+
+func set_direction_gauge_visible(on: bool) -> void:
+	if _direction_gauge:
+		_direction_gauge.set_active(on)
+
+
+func set_direction_gauge_optimal(t: float) -> void:
+	if _direction_gauge:
+		_direction_gauge.set_optimal(t)
+
+
+## The range of directions that would be an accurate shot, as a (low, high) pair
+## in 0..1 across the dial. Vector2.ZERO before the dial has been built.
+func direction_gauge_valid_range() -> Vector2:
+	if _direction_gauge:
+		return _direction_gauge.valid_range()
+	return Vector2.ZERO
 
 
 ## Flashes a big kinetic rating word (PERFECT / GOOD / OK) below the shot power
@@ -437,6 +464,23 @@ func _build() -> void:
 	_power_gauge.offset_bottom = gauge_size.y * 0.5
 	root.add_child(_power_gauge)
 	_power_gauge.set_active(false)
+
+	# Shot direction meter, revealed once a power value has been chosen. It sits
+	# to the left of the centred power meter so the two never overlap, and on the
+	# same ignore-only root so it never takes a touch.
+	_direction_gauge = DirectionGauge.new()
+	_direction_gauge.name = "DirectionGauge"
+	var dial_size := DirectionGauge.DIAL_SIZE
+	_direction_gauge.anchor_left = 0.5
+	_direction_gauge.anchor_top = 0.5
+	_direction_gauge.anchor_right = 0.5
+	_direction_gauge.anchor_bottom = 0.5
+	_direction_gauge.offset_left = -560.0
+	_direction_gauge.offset_top = -dial_size.y * 0.5
+	_direction_gauge.offset_right = -560.0 + dial_size.x
+	_direction_gauge.offset_bottom = dial_size.y * 0.5
+	root.add_child(_direction_gauge)
+	_direction_gauge.set_active(false)
 
 
 func _make_button(text: String) -> Button:

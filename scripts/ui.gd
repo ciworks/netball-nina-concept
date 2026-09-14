@@ -26,6 +26,13 @@ var _rating_tween: Tween
 const AVATAR_MARGIN := 12.0
 const AVATAR_TOP := 10.0
 
+## How far the rating word rests below the shot power meter's panel. The meter
+## owns the middle of the screen while the token holds the ball, and a clean catch
+## flashes a rating at exactly that moment, so the word reads as a caption under
+## the meter instead of over it. The word's own height is measured in
+## flash_rating and added to this gap.
+const RATING_GAP_BELOW_GAUGE := 10.0
+
 const SCENARIO_LABELS := ["A", "B", "C", "D", "E"]
 const SCENARIO_TIPS := [
 	"Horizontal: player (2,5) to ball (8,5)",
@@ -176,8 +183,9 @@ func set_power_gauge_power(value: float) -> void:
 		_power_gauge.set_power(value)
 
 
-## Flashes a big kinetic rating word (PERFECT / GOOD / OK) in the center of
-## the screen for about two seconds. Any previous rating is replaced.
+## Flashes a big kinetic rating word (PERFECT / GOOD / OK) below the shot power
+## meter, in the middle of the screen's lower half. Any previous rating is
+## replaced.
 func flash_rating(word: String, color: Color) -> void:
 	if _rating_tween and _rating_tween.is_valid():
 		_rating_tween.kill()
@@ -201,11 +209,20 @@ func flash_rating(word: String, color: Color) -> void:
 	label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.45))
 	add_child(label)
 	_rating_label = label
-	# Start slightly below center, pop in with a back-ease overshoot, then float
-	# up to center while holding, before fading out at roughly the two second mark.
-	label.pivot_offset = get_viewport().get_visible_rect().size * 0.5
-	label.offset_top = 34.0
-	label.offset_bottom = 34.0
+	# The word rests below the shot power meter rather than over the middle of the
+	# screen: the meter is up whenever the token holds the ball, and a clean catch
+	# - which is exactly when this flashes - is what starts that possession. The
+	# offset is measured from the screen centre, so the word keeps clearing the
+	# meter however the viewport is stretched.
+	var vp_size: Vector2 = get_viewport().get_visible_rect().size
+	var word_half: float = label.get_theme_font("font").get_string_size(
+			word, HORIZONTAL_ALIGNMENT_LEFT, -1, label.get_theme_font_size("font_size")).y * 0.5
+	var rating_y: float = PowerGauge.GAUGE_SIZE.y * 0.5 + RATING_GAP_BELOW_GAUGE + word_half
+	# Start slightly lower still, pop in with a back-ease overshoot, then float up
+	# into place while holding, before fading out at roughly the two second mark.
+	label.pivot_offset = Vector2(vp_size.x * 0.5, vp_size.y * 0.5 + rating_y)
+	label.offset_top = rating_y + 34.0
+	label.offset_bottom = rating_y + 34.0
 	label.scale = Vector2(0.4, 0.4)
 	label.modulate.a = 0.0
 	var tw := create_tween()
@@ -214,9 +231,9 @@ func flash_rating(word: String, color: Color) -> void:
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	tw.tween_property(label, "scale", Vector2(1.0, 1.0), 0.16) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(label, "offset_top", 0.0, 1.1) \
+	tw.parallel().tween_property(label, "offset_top", rating_y, 1.1) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(label, "offset_bottom", 0.0, 1.1) \
+	tw.parallel().tween_property(label, "offset_bottom", rating_y, 1.1) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.tween_interval(1.05)
 	tw.tween_property(label, "modulate:a", 0.0, 0.5) \

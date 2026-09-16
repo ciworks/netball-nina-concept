@@ -65,8 +65,9 @@ so it needs no texture and no scene entry.
 | `scripts/main.gd` | none | Round owner: input, projection, layout, movement, scoring. Talks to everything else. |
 | `scripts/ui.gd` | none | Builds the entire HUD in `_build()` and exposes setters. Owns the avatar widget. |
 | `scripts/avatar.gd` | `PlayerAvatar` | The reacting face box in the top-left corner. |
-| `scripts/power_gauge.gd` | `PowerGauge` | Floating shot-power meter, shown only while the token holds the ball. |
-| `scripts/direction_gauge.gd` | `DirectionGauge` | Shot direction dial, revealed once a power value is selected. |
+| `scripts/shot_meter.gd` | `ShotMeter` | The shot meter: power bar and direction dial in one control, shown while the token holds the ball. |
+| `scripts/power_gauge.gd` | `PowerGauge` | Superseded by `shot_meter.gd`. The earlier standalone power meter, no longer built by `ui.gd`. |
+| `scripts/direction_gauge.gd` | `DirectionGauge` | Superseded by `shot_meter.gd`. The earlier standalone direction dial, no longer built by `ui.gd`. |
 | `scripts/player.gd` | `PlayerToken` | Passive token. Main writes its position and state; it draws shadow, move ring and cell label. |
 | `scripts/coach.gd` | `CoachThrower` | The feed: pick spot, hold, windup, release, projectile flight, bounce, verdict. |
 | `scripts/court.gd` | `CourtBoard` | Route highlight overlay. Merges selected cells into one band. |
@@ -97,9 +98,16 @@ Public surface of `main.gd`: `random_test()`, `load_scenario(index)`,
    - Landed outside the court: `_feed_out_of_bounds()`, a `MISS`.
    - Both miss paths feed the avatar: one drop is sad, two in a row is angry.
 7. A clean catch or a collected loose ball puts the token in possession: the shot
-   power meter comes up for `POSSESSION_TIME` (3.0s). Shooting is not built, so
-   the window simply runs out, which is classed as a missed shot
-   (`_shot_window_expired()`) and the coach feeds the next ball.
+   meter comes up for `POSSESSION_TIME` (3.0s) and the token is shooting. The
+   player picks a power (hold to charge, release to lock) and then a direction
+   (hold to sweep the dial, release on the green). That second release IS the
+   shot: `_fire_shot()` judges the two values against the ranges the meter was
+   showing,
+   the ball flies to the ring, and the round settles as a GOAL or a MISS.
+   Locking the power tops the possession clock up by `AIM_WINDOW_TIME` (3.0s),
+   once per possession, so the aim gets a window of its own. Letting the window
+   run out without a shot is still a missed shot (`_shot_window_expired()`).
+   Either way the coach feeds the next ball.
 
 `State` is the round machine: `READY, DRAWING, COMMITTED, MOVING, COMPLETE,
 INVALID, MISS`.
@@ -128,9 +136,19 @@ INVALID, MISS`.
   so the verdict is shown after the movement finishes, not during it.
 - Every feed resolves exactly once, through either the loose-ball path or the
   out-of-bounds path.
-- A possession always resolves too. Once the token holds the ball the round is
-  in `COMPLETE` on the shot clock, and the clock running out is a missed shot -
-  the ball goes back to the coach either way.
+- A possession always resolves too, and exactly once. Once the token holds the
+  ball the round is in `COMPLETE` on the shot clock: either a release on the
+  dial fires the shot (`_fire_shot()`), or the clock runs out and
+  `_shot_window_expired()` classes it as a missed shot. The ball goes back to
+  the coach either way.
+- The possession clock starts at `POSSESSION_TIME` (3.0s), but the moment the
+  power is locked it is topped up by `AIM_WINDOW_TIME` (3.0s) so picking a
+  direction has a window of its own. `_aim_window_granted` allows that top-up
+  once per possession only, so re-picking the power cannot hold the round open
+  indefinitely, and it is cleared in `_start_test()`.
+- The shot takes the press for itself while the token holds the ball, so a
+  court drag and a shot can never both claim the same gesture. The power hold
+  only charges while `_has_ball` is true, and a drag only begins in `READY`.
 
 ## Avatar reactions
 
@@ -151,82 +169,108 @@ Main speaks in game terms and the avatar picks the face:
 `ui.avatar_catch_made()`, `ui.avatar_catch_missed()`, `ui.avatar_shot_made()`,
 `ui.avatar_shot_missed()`.
 
-Shooting does not exist in the prototype yet, so nothing triggers `excited` - but
-the missed-shot reaction is live: a possession whose 3 second window runs out
-without a shot is a miss, and `_shot_window_expired()` reports it. Main's
-`report_shot_result(made)` is the seam: call it with `true` for a perfect shot
-and `false` for a miss once a shooting move exists.
+Both shot reactions are live. `_resolve_shot()` reports the settled shot through
+`Main.report_shot_result(made)` - `true` for a shot that went through the ring
+(avatar `excited`), `false` for one that came down beside it (avatar `angry`).
+`_shot_window_expired()` reports the other miss: a possession whose 3 second
+window ran out with no shot taken. `report_shot_result(made)` stays the single
+seam for a shot outcome; nothing else should call the avatar's shot reactions.
 
-## Shot power meter
+## The shot meter
 
-`scripts/power_gauge.gd` (`PowerGauge`) is a floating panel anchored to the centre
-of the screen, built in code by `ui.gd` on the same ignore-only root as the rest
-of the HUD. It is visible only while the token is holding the ball, which Main
-tracks as `_has_ball` and pushes out through `ui.set_power_gauge_visible()`.
+`scripts/shot_meter.gd` (`ShotMeter`) is one floating control holding both halves
+of a shot: the power bar on the left, the direction dial on the right. `ui.gd`
+builds it in `_build()` on the same ignore-only root as the rest of the HUD and
+re-exposes it as the `ui.shot_meter_*` / `ui.set_shot_meter_*` wrappers, which
+are the only surface `main.gd` uses.
 
-- Possession starts on a clean catch (`_complete_catch()`) or on collecting a
-  loose ball (the collect branch of `_finish_movement()`), and ends when the
-  coach takes the ball back for the next feed (`_start_coach_round()`).
-- The window is `POSSESSION_TIME` (3.0s), and it is the round's `State.COMPLETE`
-  timer, so the meter stays up for 3 seconds once it appears. Letting it run out
-  without a shot is classed as a missed shot: `_shot_window_expired()` reports it
-  through `report_shot_result(false)` (the avatar goes angry) and settles through
-  the normal `MISS` beat, which hands the next feed to the coach.
-- `CATCH_COMPLETE_TIME` (1.6s) now only governs the route highlight and the
-  rating beat, not the length of the possession.
-- The required range is sized from `Main.distance_to_post_cells()` - the
+- It is visible while the token holds the ball and is choosing: `_has_ball and
+  not _shot_active`, pushed through Main's `_change_shot_meter(on)`, which is the
+  one place that shows and hides it.
+- Both halves work the same way: hold, and the needle moves by itself; release,
+  and the value it was on is locked in. The power needle climbs from zero
+  (`CHARGE_SPEED`); the aim needle sweeps back and forth between the dial's two
+  extreme values and bounces off them (`SWEEP_SPEED`), so the green arc is a
+  timing window to catch rather than a spot to drag onto.
+- The two halves are still answered in order, because a direction is only
+  meaningful against a settled power. Before a power is locked the press charges
+  the power needle; once one is locked a press takes the aim sweep
+  (`begin_aim()`), unless it landed on the power bar (`BAR_HIT`), which re-picks
+  the power instead. Every aim sweep restarts from the dial's low end, so the
+  timing reads the same way each time.
+- The required power range is sized from `_distance_to_post_cells()` - the
   straight-line distance from the token's cell to `POST_CELL`, in court cells.
-  The mapping (which power band, how wide) lives in `power_gauge.gd` as
-  `MIN/MAX_DISTANCE_CELLS`, `BAND_CENTER_NEAR/FAR` and `BAND_HALF_NEAR/FAR`:
+  The mapping (which band, how wide) lives in `shot_meter.gd` as
+  `MIN/MAX_DISTANCE_CELLS`, `BAND_CENTER_NEAR/FAR`, `BAND_HALF_NEAR/FAR`:
   further out means more power and a narrower band.
-- Selecting a value is hold and release. The meter itself never reads input, so
-  `Main._unhandled_input()` watches the press and release: pressing while the
-  token holds the ball calls `_begin_power_charge()` (the needle charges from
-  zero under `CHARGE_SPEED`), and letting go calls `_release_power_charge()`,
-  which locks the value into `_selected_power` through `ui.power_gauge_power()`.
-  A press only charges when `_has_ball` is true and a drag only begins in
-  `READY`, so the two can never overlap.
-- Hold and release only ever sets a value. No shot is fired: the possession
-  clock keeps running down and still ends as a missed shot, so the selected
-  value is read by nothing but the debug line.
-- Selecting a value raises the shot direction meter (see the next section): the
-  power is locked on release, so a direction is chosen against a settled power.
-  `in_accuracy_band()` says whether a locked needle sits inside the required
-  band, and a settled shot should report through `Main.report_shot_result(made)`.
+- The green arc on the dial spans `DIRECTION_TOLERANCE` (0.05) either side of the
+  optimal direction - 5% each way, which over the dial's 180 degree sweep is 9
+  degrees either way. The optimal direction is owned by Main's
+  `_optimal_direction_t()`: the direction from the token's screen position to
+  `grid_to_screen(POST_CELL)`, read in screen space so the dial matches the
+  projection the player can see, with a post below the token clamped to the
+  nearest end.
+- `required_range()`, `valid_range()` and `in_valid_range()` are what a shot is
+  judged against, and they are exactly what the HUD is drawing, so the picture
+  and the verdict can never disagree.
 - The meter must stay `MOUSE_FILTER_IGNORE`. It hangs over the middle of the
   court, and a Control that stopped touches there would eat drag strokes drawn
-  across the screen (hard rule 4).
+  across the screen (hard rule 4). Main reads the press and release itself in
+  `_unhandled_input()`.
 
-## Shot direction meter
+`scripts/power_gauge.gd` and `scripts/direction_gauge.gd` are the two earlier,
+separate halves of this meter. `ShotMeter` replaced both and `ui.gd` no longer
+builds either, so they are dead code kept only as reference.
 
-`scripts/direction_gauge.gd` (`DirectionGauge`) is a semicircular dial, built in
-code by `ui.gd` on the same ignore-only root as the rest of the HUD. It is the
-direction half of a shot, the way the power meter is the strength half, and it is
-built to the supplied reference art.
+## The shot
 
-- The art it follows: a flat grey outer track, a coloured band inside it, and a
-  dark needle turning on a hub at the bottom centre.
-- The needle position is a direction across the upper half of the screen: dial
-  left is aimed left, dial middle is straight up the screen, dial right is aimed
-  right. It reads in screen space because it has to match the direction the
-  player can actually see in the 3/4 projection.
-- The optimal direction is owned by Main (`_optimal_direction_t()`): the
-  direction from the token's screen position to `grid_to_screen(POST_CELL)`,
-  mapped onto 0..1 across the dial. A post below the token clamps to the nearest
-  end, because the dial only covers the upper half of the screen.
-- Green is a valid shot and red is out of bounds. The green arc spans
-  `DIRECTION_TOLERANCE` (0.05) either side of the optimal direction - 5% each
-  way, which over the dial's 180 degree sweep is 9 degrees either way.
-- It appears once a power value has been selected, because a direction is chosen
-  against a settled power. `_release_power_charge()` locks the power and then
-  raises the dial, and `_sync_power_gauge()` keeps the optimal direction in step
-  while it is up. It hides again at the next feed.
-- Nothing moves the needle yet and no shot is fired, so it sweeps the dial by
-  itself (`SWEEP_SPEED`) to show where the green range sits. A direction move
-  should call `set_direction()` and judge with `in_valid_range()` or
-  `valid_range()`, then report through `Main.report_shot_result(made)`.
-- It must stay `MOUSE_FILTER_IGNORE`, like every other floating HUD node: a
-  Control that stopped touches over the court would eat drag strokes (hard rule 4).
+A shot is taken when the player releases while the dial is sweeping. That release
+is the trigger: the press started the sweep, the release locks the direction the
+needle had reached and fires.
+
+- `Main._unhandled_input()` routes the press and release: `_press_with_ball(pos)`
+  picks the half, `_release_with_ball()` locks the power (and lights the dial)
+  or, while `_aiming`, locks the direction the sweep had reached and fires.
+- A drag while the dial is held is ignored: the aim needle is not the finger's,
+  it sweeps on its own, so `InputEventScreenDrag` / `InputEventMouseMotion` only
+  ever drive a court route.
+- `_release_with_ball()` calls `_fire_shot()`, which is the one place a shot is
+  judged. It freezes `_selected_power` / `_selected_direction` against the
+  ranges the meter was showing at that moment, so a make means power inside its
+  band AND direction inside the green arc.
+- A make arrives over the ring and drops through it; a miss is offset by how far
+  outside each range the value was (`_shot_miss_error()`, `_side_error()`): the
+  power error carries the ball short or long as a fraction of the distance it had
+  to travel (`SHOT_MISS_REACH`), and the dial error swings it off to that side by
+  an angle (`SHOT_MISS_ANGLE`), each with a floor so a near miss still lands clear
+  of the ring rather than looking like it went in.
+- The ball is not a colliding object. The flight, the ring and the drop through
+  the net are all drawn by `_draw_shot_ball()`, and the verdict is read off that
+  same path.
+- **The flight carries a ground track and a height separately, and a shot that
+  reaches the post must ARRIVE at ring height.** `_shot_ground_at(t)` is the
+  projected horizontal path to the floor point under the ring; `_shot_height_at(t)`
+  climbs from `SHOT_RELEASE_HEIGHT` to the ring's height, plus an arc lift
+  (`SHOT_ARC_MIN`/`SHOT_ARC_MAX`, fullest at `SHOT_ARC_FULL_CELLS`) that is zero at
+  both ends. The ball is drawn at the ground point lifted by the height. Getting
+  this wrong is what makes a shot slide along the floor: a height term built from
+  `sin(t * PI)` alone is zero on arrival, so the ball would land at the foot of the
+  post instead of at the hoop.
+- The ring is read into court space, not off the screen: `_hoop_logical()` returns
+  the point on the floor under the ring plus `HOOP_HEIGHT_CELLS`. It must NOT
+  unproject the ring's SCREEN point - the ring's drawn position is lifted off the
+  floor by its own height, so the floor inverse would read that height as distance
+  up the court and throw the ball at the middle of the court. The sprite's base
+  point (which is on the floor) carries the x across instead.
+- `HOOP_HEIGHT_FRAC` / `HOOP_X_FRAC` are measured off
+  `res://images/netball_post.png` by `res://tools/inspect_post.tscn`, and both the
+  sprite and the flight are built from the same numbers. Re-measure if the post art
+  is replaced.
+- `_resolve_shot()` runs once the ball has come down: it reports through
+  `report_shot_result(made)` (avatar `excited` on a goal, `angry` on a miss) and
+  hands the round back to the next feed. A `GOAL` / `SHOT MISSED` beat holds for
+  `SHOT_RESULT_TIME`, and a floor ring where the ball landed fades out over
+  `SHOT_LANDING_MARK_TIME`.
 
 ## Common change recipes
 
@@ -235,7 +279,9 @@ built to the supplied reference art.
   Expression keys live in `avatar.gd` as `EXPRESSION_*`.
 - **New test scenario**: add an entry to `SCENARIOS` in `main.gd` and matching
   entries to `SCENARIO_LABELS` and `SCENARIO_TIPS` in `ui.gd`. The three lists
-  are indexed together by button position and must stay the same length.
+  are indexed together by button position and must stay the same length. Note
+  that `ui.gd` does not currently build those buttons, so a new scenario is only
+  reachable from code until they are switched back on.
 - **Repaint the court**: edit the `Court` and `CourtMarkings` layers in the
   editor's TileMap panel. If the atlas layout itself changes, regenerate the
   `tile_map_data` blob with `res://tools/dump_court_data.tscn` and paste the
@@ -245,6 +291,14 @@ built to the supplied reference art.
   and its corner cuts, so the art is the styling.
 - **Change the feed**: `coach.gd` phases and constants, plus the round
   start/advance calls in `main.gd`.
+- **Change how a shot is judged or flown**: `main.gd`'s `_fire_shot()` (the
+  judging rule and where a miss comes down) and the `SHOT_*` constants beside it
+  (flight time per cell, arc height by distance, how far and how wide a miss
+  spreads). The flight shape itself is `_shot_ground_at()` + `_shot_height_at()`.
+  The ring comes from `_hoop_logical()` off `HOOP_HEIGHT_FRAC` / `HOOP_X_FRAC`, so
+  re-measure with `res://tools/inspect_post.tscn` if the post art changes.
+- **Retune the meter's ask**: `shot_meter.gd`'s band constants (power) and
+  `DIRECTION_TOLERANCE` (the green arc's width).
 - **Change HUD layout**: `ui.gd` `_build()`. The avatar is pinned top-left and
   the control bar's left offset is derived from the avatar size, so keep those
   two in step.
@@ -258,16 +312,21 @@ built to the supplied reference art.
 - `build_run_sheet.*`, `inspect_run_sheet.*`, `verify_run_anim.*` - build and
   inspect the player run cycle sprite sheet.
 - `inspect_highlight.*` - samples the route highlight image.
+- `inspect_post.*` - prints the hoop's position inside `netball_post.png`, which
+  is where the `HOOP_*` constants in `main.gd` come from.
 - `asset_check.*` - asset sanity check.
 
 ## Known gaps and placeholder art
 
-- Still no shooting mechanic: nothing fires, and the possession window's
-  expiry-as-a-miss is the only shot outcome that exists. Both halves of the aim
-  are built and wired (the power meter and the direction dial), so the missing
-  piece is a trigger that reads `power()` / `direction()` against
-  `required_range()` and `valid_range()` and reports through
-  `Main.report_shot_result(made)`.
+- The shot is judged from the values the player selected, not from a simulated
+  ball: a make goes through the ring and a miss comes down beside it, both
+  drawn. There is no rebound, no goal defence and no scoring streak - a made
+  shot goes straight on to the next feed.
+- The possession window still ends a shot-less possession as a miss
+  (`_shot_window_expired()`), which is what happens if the player never releases
+  on the dial. The clock it runs on is `POSSESSION_TIME` plus the single
+  `AIM_WINDOW_TIME` top-up once a power is locked, so a player who charges and
+  then never aims gets the longer of the two windows.
 - The coach and the ball are drawn from primitives in `coach.gd` `_draw()`.
   Swap in real art when it exists.
 - The token's animations come from `res://images/player_frames.tres`; `player.gd`

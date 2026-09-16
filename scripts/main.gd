@@ -55,10 +55,9 @@ const RATING_OK_COLOR := Color(1.0, 0.62, 0.25, 1.0)
 ## one and a half, so it stands about twice as tall as the token art.
 const POST_HEIGHT_CELLS := 2.0
 
-## The cell the post stands on: the middle of the right goal line, which is the
-## line a feed is out past (logical x > GRID_MAX) and where a shot will be aimed
-## once shooting exists.
-const POST_CELL := Vector2i(GRID_MAX, 5)
+## Fallback used only if the Goal node is unavailable during early setup. The
+## editable goal position lives on GoalZone.goal_cell.
+const DEFAULT_GOAL_CELL := Vector2i(GRID_MAX, 5)
 
 const SCENARIOS := [
 	{"name": "A - Horizontal", "player": Vector2i(2, 5), "target": Vector2i(8, 5)},
@@ -80,22 +79,77 @@ const LOOSE_BALL_TIME := 6.0
 ## Instruction shown while the token holds the ball: what the shot power meter
 ## asks of the player.
 const SHOT_HINT := "Hold to charge the shot power, release to set it."
+
+## The direction half of the shot is live once a power value is locked, so the
+## press now means aim and the release means shoot.
+const SHOT_HINT_AIM := "Hold to sweep the dial, release on the green to shoot."
+
+## The shot flight. The time is scaled from the distance to the ring, so a long
+## shot is in the air longer than a short one, and the ball bows sideways on the
+## way - a thrown ball never travels in a dead straight line.
+const SHOT_FLIGHT_MIN := 0.35
+const SHOT_FLIGHT_MAX := 0.8
+## Seconds added to the flight per court cell of ground the ball has to cover, so
+## a shot from the far end of the court is in the air longer than one from under
+## the post. The flight is capped at SHOT_FLIGHT_MAX.
+const SHOT_FLIGHT_PER_CELL := 0.045
+const SHOT_BOW_CELLS := 0.55
+
+## How high off the floor the ball leaves the token's hands, in court cells: about
+## waist height on the token, so the flight starts from the hands and not off the
+## feet.
+const SHOT_RELEASE_HEIGHT := 0.55
+
+## The shape of the arc, in court cells: the flight's control point sits this far
+## above the ring, so the ball climbs over the hoop and is already on its way down
+## when it arrives - the shape a shot has, rather than sliding in level with the
+## ring. A long shot arcs more than a short one, the way a longer throw does, and
+## SHOT_ARC_FULL_CELLS is the distance out at which the arc is at its fullest.
+const SHOT_ARC_MIN := 0.7
+const SHOT_ARC_MAX := 1.6
+const SHOT_ARC_FULL_CELLS := 8.0
+
+## How long the ball takes to fall through the net once it has reached the ring.
+const SHOT_DROP_TIME := 0.35
+
+## Where a mistaken shot comes down. A power error carries the ball short or long
+## as a fraction of its distance to the ring (SHOT_MISS_REACH), so an
+## under-powered long shot falls meaningfully shorter than an under-powered short
+## one; a dial error rotates the aim off the ring, because the dial sweeps half a
+## turn and so reads as an angle (SHOT_MISS_ANGLE). Each keeps a floor
+## (SHOT_MISS_MIN_*) so a shot that only just missed still lands clear of the ring
+## instead of looking like it went through it.
+const SHOT_MISS_REACH := 0.42
+const SHOT_MISS_ANGLE := 0.30
+const SHOT_MISS_MIN_REACH := 0.18
+const SHOT_MISS_MIN_ANGLE := 0.035
+
+## How long the ring the last shot left on the floor stays up, fading out, and
+## how long the GOAL / SHOT MISSED beat holds before the next feed.
+const SHOT_LANDING_MARK_TIME := 1.4
+const SHOT_RESULT_TIME := 1.4
 ## Seconds the route highlight and the rating beat hold after a clean catch. The
 ## round itself stays in COMPLETE for POSSESSION_TIME, because the token keeps
 ## the ball until the shot window closes.
 const CATCH_COMPLETE_TIME := 1.6
 ## Seconds the token holds the ball after taking a feed: the window the shot
 ## power meter is up for. Letting it run out without a shot is a missed shot and
-## the coach feeds the next ball, so every possession resolves even though
-## shooting itself is not built yet.
+## the coach feeds the next ball, so every possession resolves.
 const POSSESSION_TIME := 3.0
+
+## Seconds added to that window the moment the shot power is locked, once per
+## possession. Choosing a direction is a second decision with its own timing, and
+## the power hold has usually used part of the original window already, so the aim
+## gets a window of its own before the possession is classed as a missed shot.
+const AIM_WINDOW_TIME := 3.0
 
 @onready var player = $Player
 @onready var ui: CanvasLayer = $UI
 @onready var court_markings: TileMapLayer = $CourtRig/CourtMarkings
 @onready var court_route: CourtBoard = $CourtRig/CourtRoute
 @onready var court_rig: Node2D = $CourtRig
-@onready var goal_post: Sprite2D = $GoalPost
+@onready var goal: GoalZone = $Goal
+@onready var goal_post: Sprite2D = $Goal/GoalPost
 
 ## Top-line coach feeding the ball. Built in code (see _create_coach) so the
 ## placeholder sprite needs no scene node and no texture file.
@@ -156,19 +210,32 @@ var _feed_count := 0
 
 ## True while the token is holding the ball: from a clean catch or a collected
 ## loose ball until the coach takes the ball back for the next feed. This is the
-## window the shot power meter is shown in - the player only owns the ball then,
-## and shooting does not exist yet, so nothing else reads it.
+## window the shot meter is shown in - the player only owns the ball then, and
+## shooting does not exist yet, so nothing else reads it.
 var _has_ball := false
-## Last visibility pushed to the power gauge, so the UI is only told when it
+## Last visibility pushed to the shot meter, so the UI is only told when it
 ## actually changes rather than every frame.
-var _gauge_shown := false
-## Last visibility pushed to the shot direction meter, which only appears once a
-## power value has been selected.
-var _direction_shown := false
+var _meter_shown := false
 ## The shot power value the player last selected by holding the meter down and
-## releasing, or -1.0 while nothing is selected. A shot will be judged on this
-## once shooting exists; the direction that pairs with it is not built yet.
+## releasing, or -1.0 while nothing is selected. Locking a power is what makes
+## the direction half of the meter live, and _fire_shot() judges it against the
+## range the bar was showing.
 var _selected_power := -1.0
+## True while the aim press is down, so the release that follows is the shot. The
+## press that picks the power and the press that starts the aim are the same
+## gesture, told apart by when they happen and where they land: the dial is only
+## live once a power is locked, and a press on it starts the sweep rather than a
+## fresh charge.
+var _aiming := false
+## The dial position the player last settled on, or -1.0 while no direction is
+## chosen. _fire_shot() reads it as the direction the shot was sent in.
+var _selected_direction := -1.0
+## True once the aim allowance has been granted for this possession, so a player
+## who re-picks the power cannot keep topping the possession clock back up.
+var _aim_window_granted := false
+
+## The shot's own state (the flight, the values it was taken with, the mark it
+## leaves) is declared with the shot code further down this file.
 
 
 func _ready() -> void:
@@ -182,7 +249,6 @@ func _ready() -> void:
 		"debug": Callable(self, "_on_debug_toggle"),
 		"grid": Callable(self, "_on_grid_toggle"),
 	})
-	ui.set_debug_panel_visible(true)
 	ui.set_status("READY")
 
 
@@ -199,7 +265,11 @@ func _process(delta: float) -> void:
 		State.COMPLETE:
 			_complete_timer -= delta
 			if _complete_timer <= 0.0:
-				if _has_ball:
+				if _shot_active:
+					# The ball is still on its way to the hoop: the shot
+					# resolves when the ball arrives, not by this clock.
+					_complete_timer = 0.25
+				elif _has_ball:
 					# The token still holds the ball, so this clock was not
 					# waiting on the catch - it was holding the shot window open
 					# and the shot never came.
@@ -224,45 +294,57 @@ func _process(delta: float) -> void:
 		_loose_timer -= delta
 		if _loose_timer <= 0.0:
 			_lose_loose_ball()
+	_advance_shot(delta)
+	if _landing_timer > 0.0:
+		_landing_timer -= delta
 	_resolve_pending_throw()
-	_sync_power_gauge()
+	_sync_shot_meter()
 	queue_redraw()
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# Holding the ball turns a press into a power charge and its release into a
-	# selection, so the meter is driven by the same press the drag uses. The two
-	# can never overlap: a drag only starts in READY, and possession is COMPLETE.
+	# Holding the ball turns a press into meter input, so the meter is driven by
+	# the same press the court drag uses. The two can never overlap: a court drag
+	# only starts in READY, and possession is COMPLETE.
+	#
+	# Possession is two decisions taken in order, so the same press means
+	# different things as it goes on: before a power is locked the press charges
+	# the needle, and once a power is locked a press that lands on the dial aims
+	# it. See _press_with_ball().
 	if event is InputEventScreenTouch:
 		if event.pressed:
 			if _has_ball:
-				_begin_power_charge()
+				_press_with_ball(event.position)
 			elif state == State.READY and _near_player(event.position):
 				_begin_drag(event.index, event.position)
 		else:
 			if _has_ball:
-				_release_power_charge()
+				_release_with_ball()
 			elif _active_drag == event.index and state == State.DRAWING:
 				_end_drag()
 	elif event is InputEventScreenDrag:
+		# A drag during a shot is not aim input any more: the needle sweeps the
+		# dial on its own while the press is held. Only a court route still
+		# follows the finger.
 		if _active_drag == event.index and state == State.DRAWING:
 			_update_drag(event.position)
 	elif event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				if _has_ball:
-					_begin_power_charge()
+					_press_with_ball(event.position)
 				elif state == State.READY and _near_player(event.position):
 					_mouse_dragging = true
 					_begin_drag(-1, event.position)
 			else:
 				if _has_ball:
-					_release_power_charge()
+					_release_with_ball()
 				elif _mouse_dragging:
 					_mouse_dragging = false
 					if state == State.DRAWING:
 						_end_drag()
 	elif event is InputEventMouseMotion:
+		# The dial sweeps itself, so mouse motion only ever drives a court route.
 		if _mouse_dragging and state == State.DRAWING:
 			_update_drag(event.position)
 
@@ -570,13 +652,19 @@ func _start_test(announce: String) -> void:
 	_mouse_dragging = false
 	_crossing = false
 	highlight_timer = 0.0
+	# A new court starts with no shot in the air and no selection carried over.
+	_shot_active = false
+	_clear_selected_shot()
+	_landing_timer = 0.0
+	# The aim allowance is per possession, so a new court starts without one.
+	_aim_window_granted = false
+	_change_shot_meter(false)
 	state = State.READY
 	player.position = grid_to_screen(player_cell)
 	player.radius = _token_radius()
 	player.set_label("Player (%d,%d)" % [player_cell.x, player_cell.y])
 	player.set_pulse(true)
 	ui.set_status("READY")
-	ui.set_debug_panel_visible(true)
 	_set_default_instruction()
 	if announce != "":
 		ui.show_message(announce, true)
@@ -656,20 +744,20 @@ func _recompute_layout() -> void:
 		# its origin is court_rect.position (not the half-cell-back panel origin
 		# the tile layers use) and a spot of (x, 0) lands on the top line.
 		coach.layout(court_rect.position, Vector2(cell_w, cell_h), _project_point)
+	if goal != null:
+		# Goal owns both the visual post and the invisible scoring zone. Its
+		# exported goal_cell and zone settings are independent of the post art.
+		goal.layout(grid_to_screen(goal.goal_cell), Vector2(cell_w, cell_h))
 	if goal_post != null:
-		# The post is a scene node, not generated art, and stays upright in screen
-		# space the same way the token and the ball do - so only its scale follows
-		# the court. Its base sits on its cell and its art is scaled so the whole
-		# post is POST_HEIGHT_CELLS tall, which keeps it the same height next to
-		# the player however the viewport resizes.
-		goal_post.position = grid_to_screen(POST_CELL)
+		# The Goal node is the post foot anchor. Keep the Sprite2D visual-only and
+		# let GoalZone place the Area2D separately at hoop height.
+		goal_post.position = Vector2.ZERO
 		var post_tex := goal_post.texture
 		if post_tex != null and post_tex.get_height() > 0:
 			var tex_h := float(post_tex.get_height())
 			goal_post.scale = Vector2.ONE * (float(cell_h) * POST_HEIGHT_CELLS / tex_h)
 			# A centered sprite is drawn around its origin, so lift the art by half
-			# its height to sit its feet on the origin - i.e. on the goal line
-			# rather than straddling it.
+			# its height to sit its feet on the goal line rather than straddling it.
 			goal_post.offset = Vector2(0.0, -tex_h * 0.5)
 
 
@@ -870,10 +958,17 @@ func _draw() -> void:
 	# While the coach holds or throws the ball it draws the ball itself, at its
 	# own arc height, so the resting ball is only drawn when the coach is not
 	# the one owning it.
-	if coach == null or not (coach.ball_in_hand() or coach.ball_airborne()):
+	if _shot_active:
+		# The shot owns the ball for its flight, so the resting ball is skipped
+		# and the flying one is drawn instead - at its own height, from the same
+		# path the verdict is read off.
+		_draw_shot_ball()
+	elif coach == null or not (coach.ball_in_hand() or coach.ball_airborne()):
 		_draw_ball()
 	if coach != null and coach.indicator_visible():
 		_draw_destination_indicator()
+	if _landing_timer > 0.0:
+		_draw_landing_mark()
 	if state == State.DRAWING or state == State.MOVING or state == State.COMMITTED:
 		_draw_route_overlay()
 	if highlight_timer > 0.0:
@@ -1044,9 +1139,12 @@ func _start_coach_round() -> void:
 	# The ball goes back to the coach for this feed, so the token no longer
 	# holds it and the shot power meter has nothing to show until the next catch.
 	_has_ball = false
-	# A new feed means a new possession to come, so the value selected last time
-	# is gone.
+	# A new feed means a new possession to come, so both selections from last
+	# time are gone and the direction half of the meter starts switched off
+	# again: it only lights up once a fresh power value is locked.
 	_selected_power = -1.0
+	_selected_direction = -1.0
+	_aiming = false
 	_feed_count += 1
 	if coach != null:
 		coach.start_round(target_cell)
@@ -1215,65 +1313,467 @@ func report_shot_result(made: bool) -> void:
 		ui.avatar_shot_missed()
 
 
-## --- Shot power meter ---------------------------------------------------------
-## The meter is the display half of a shot the prototype does not have yet: it
-## comes up while the token holds the ball, and the range it asks for is sized
-## from how far the token stands from the post at POST_CELL - stood under the
-## post wants little power, a shot from the far end wants nearly all of it.
-## Nothing consumes the power value: no input is read and no shot is fired, so
-## the gauge sweeps its own needle and this only keeps it in step with
-## possession and distance. A future shooting move should drive the needle with
-## set_shot_power(), judge the result with shot_power_required_range() and
-## report it through report_shot_result(made) above.
-
-
-## Keeps the meter in step with the round. Pushed every frame because the token
-## can still be walking its route while it holds the ball; the gauge itself skips
-## the work when the distance has not changed.
-func _sync_power_gauge() -> void:
-	if _has_ball != _gauge_shown:
-		_gauge_shown = _has_ball
-		ui.set_power_gauge_visible(_has_ball)
-	if _has_ball:
-		ui.set_power_gauge_distance(_distance_to_post_cells())
-	# The direction meter appears only once a power value has been selected, and
-	# it tracks the token while it still holds the ball: the optimal direction is
+## --- Shot meter (power and direction in one control) --------------------------
+## The meter is the display half of a shot the prototype does not have yet. It
+## comes up while the token holds the ball, and it is one control with two
+## halves that are answered in order:
+##
+## 1. Power. Hold anywhere to charge the needle, let go to lock the value. The
+##    range it asks for is sized from how far the token stands from the post at
+##    POST_CELL - stood under the post wants little power, a shot from the far
+##    end wants nearly all of it.
+## 2. Direction. It is grey and inert until a power value is locked, and then it
+##    lights up and a press on the dial aims it. See _press_with_ball().
+##
+## Both halves are read at the moment of the shot (see the shot section below):
+## shot_power_required_range() is the power the meter was asking for and
+## shot_direction_valid_range() is the aim, so a shot is judged against exactly
+## the ranges the player was shown.
+func _sync_shot_meter() -> void:
+	# The meter is the selection half of the shot, so it is only up while there is
+	# a selection left to make: it goes away the moment the ball does.
+	_change_shot_meter(_has_ball and not _shot_active)
+	if not _meter_shown:
+		return
+	ui.set_shot_meter_distance(_distance_to_post_cells())
+	# The optimal direction is the direction from the token to the post, so it is
 	# measured from wherever the token is standing, and it can still be walking.
-	var direction_shown := _has_ball and _selected_power >= 0.0
-	if direction_shown != _direction_shown:
-		_direction_shown = direction_shown
-		ui.set_direction_gauge_visible(direction_shown)
-	if direction_shown:
-		ui.set_direction_gauge_optimal(_optimal_direction_t())
+	ui.set_shot_meter_optimal(_optimal_direction_t())
 
 
-## The player pressed down while holding the ball, so the meter starts charging
-## the needle from zero. Pressing again during the same possession restarts it.
-func _begin_power_charge() -> void:
+## The player pressed down while holding the ball. The press means whatever the
+## meter is asking for next: until a power value is locked it charges the power
+## needle, and once one is locked a press that lands on the dial takes the aim
+## needle instead. A press anywhere else - off the dial, or on the power bar -
+## restarts the power charge, which is what re-picking a power looks like.
+func _press_with_ball(pos: Vector2) -> void:
 	if not _has_ball:
 		return
-	ui.begin_power_charge()
+	if _selected_power >= 0.0 and ui.shot_meter_begin_aim(pos):
+		_aiming = true
+		ui.set_instruction(SHOT_HINT_AIM)
+		return
+	# A press anywhere but the live dial re-picks the power. A direction is only
+	# chosen against a settled power, so re-picking throws the old one away.
+	_clear_selected_shot()
+	ui.shot_meter_begin_charge()
 	ui.set_instruction(SHOT_HINT)
 
 
-## The player let go, so the value the needle reached is the power they selected
-## and the shot direction meter comes up against it: a direction is chosen
-## against a power that is already locked. Nothing fires yet - the shot itself is
-## still not built - so the possession window goes on running down and still ends
-## as a missed shot.
-func _release_power_charge() -> void:
+## The player let go. The release means whatever the press was for: a release off
+## the dial locks the power value the needle reached and lights the dial up, and a
+## release on the dial settles the direction the needle is left on - which is the
+## shot. See _fire_shot() for what makes one go in.
+func _release_with_ball() -> void:
 	if not _has_ball:
 		return
-	ui.release_power_charge()
-	_selected_power = ui.power_gauge_power()
-	ui.set_direction_gauge_optimal(_optimal_direction_t())
-	ui.set_instruction("Shot power set at %d%% - choose a direction." % roundi(_selected_power * 100.0))
+	if _aiming:
+		ui.shot_meter_lock_direction()
+		_selected_direction = ui.shot_meter_direction()
+		_fire_shot()
+		return
+	ui.shot_meter_release_charge()
+	_selected_power = ui.shot_meter_power()
+	ui.set_shot_meter_optimal(_optimal_direction_t())
+	# The direction is a second decision with its own timing, so locking the power
+	# tops the possession clock up by AIM_WINDOW_TIME. The flag keeps it to once
+	# per possession: a player who re-picks the power cannot hold the round open
+	# by topping the clock back up every time.
+	if not _aim_window_granted:
+		_aim_window_granted = true
+		_complete_timer += AIM_WINDOW_TIME
+	ui.set_instruction("Power %d%% locked - %s" % [roundi(_selected_power * 100.0), SHOT_HINT_AIM])
+
+
+## --- The shot ----------------------------------------------------------------
+## A shot is taken once both halves of the meter are settled: the power locked by
+## a hold and release, and the direction the aim needle was left on by a release
+## on the dial. That second release is the trigger.
+##
+## Main judges the two selected values against the ranges the meter was showing at
+## that moment - the same required_range() and valid_range() the player was
+## reading off the HUD. Inside both, the ball goes through the ring. Outside
+## either, it comes down beside it, offset by how far outside the shot was, so a
+## miss reads as short, long or wide instead of random.
+##
+## The ball is not an object that collides with anything: the flight, the ring and
+## the drop through the net are all drawn by _draw_shot_ball(). What the shot
+## means - in, or out - is decided by _fire_shot() and then shown.
+
+## True while a shot ball is on its way to the ring.
+var _shot_active := false
+## Flight clock and where it started, so the ball can be drawn at any point on it.
+var _shot_t := 0.0
+var _shot_flight := SHOT_FLIGHT_MIN
+var _shot_drop := 0.0
+var _shot_made := false
+## Visual spin for the drawn shot ball. The start angle follows the direction
+## from the player to HoopTarget, while the selected power controls spin amount.
+var _shot_rotation := 0.0
+var _shot_rotation_tween: Tween = null
+## How much extra lift the flight has through its middle, in court cells: the
+## height above the straight line from the release to the ring at the halfway
+## point. Sized from the distance the shot was taken from.
+var _shot_arc := SHOT_ARC_MIN
+## The values this shot was taken with, and the optimal direction it was judged
+## against, kept for the verdict and the debug line.
+var _shot_power := -1.0
+var _shot_direction := -1.0
+var _shot_optimal := 0.5
+## The flight, in logical court space (all floor points - heights are added when
+## the ball is drawn): where the ball left the hands, the control point that shapes
+## the sideways bow, and the point on the floor beneath the ring that the ball
+## aims to arrive over.
+var _shot_from_logical := Vector2.ZERO
+var _shot_bow_logical := Vector2.ZERO
+var _shot_target_floor := Vector2.ZERO
+## The scoring zone the ball is aiming at, in court cells: its height above the
+## floor. Read from the independent logical zone when the shot is fired, so the
+## flight and verdict do not depend on the visual post sprite.
+var _shot_ring_height := 0.0
+## Where the ball comes down when the shot is not a make: a point on the floor,
+## short or long of the ring by the power error and out to the side by the dial
+## error. Equal to _shot_target_floor on a make, whose ball goes through the ring
+## instead of past it.
+var _shot_miss_floor := Vector2.ZERO
+## A short-lived ring on the floor where the last shot came down, green if it went
+## in, so the outcome is readable after the ball has gone.
+var _landing_mark := Vector2.ZERO
+var _landing_timer := 0.0
+
+
+## Fire. This is the one place a shot is judged, and it is judged against the two
+## ranges the meter is asking for: power inside its required band, direction
+## inside the green arc. Either one outside, and the ball comes down beside the
+## ring instead of through it.
+func _fire_shot() -> void:
+	if not _has_ball or _shot_active:
+		return
+	var band: Vector2 = ui.shot_meter_required_range()
+	var valid: Vector2 = ui.shot_meter_valid_range()
+	_shot_power = _selected_power
+	_shot_direction = _selected_direction
+	_shot_optimal = _optimal_direction_t()
+	var meter_made := _shot_power >= band.x and _shot_power <= band.y \
+			and _shot_direction >= valid.x and _shot_direction <= valid.y
+	# The token has thrown the ball: it does not hold it any more, and the meter
+	# is a selection tool, so it goes away with the ball.
+	_has_ball = false
+	_aiming = false
+	_change_shot_meter(false)
+	player.set_pulse(false)
+
+	_shot_from_logical = court_rect.position + Vector2(player_cell.x * cell_w, player_cell.y * cell_h)
+	# The flight targets GoalZone's logical scoring point, never the post art.
+	# The ball arrives at the independently tuned zone height over its floor anchor.
+	_shot_ring_height = goal.hoop_height_cells if goal != null else 1.7
+	_shot_target_floor = _goal_floor_logical()
+	var hoop_target_screen := _goal_target_screen()
+	var to_ring := _shot_target_floor - _shot_from_logical
+	if to_ring.length() < 0.001:
+		to_ring = Vector2.RIGHT
+	var range_cells := to_ring.length()
+	var unit := to_ring.normalized()
+	# The arc: the ball leaves the hands at SHOT_RELEASE_HEIGHT, is at the ring's
+	# height when it arrives, and carries extra lift through the middle that grows
+	# with the distance the shot was taken from.
+	_shot_arc = clampf(
+			SHOT_ARC_MIN + range_cells / SHOT_ARC_FULL_CELLS * (SHOT_ARC_MAX - SHOT_ARC_MIN),
+			SHOT_ARC_MIN, SHOT_ARC_MAX)
+	# A thrown ball bows sideways on its way rather than travelling dead straight.
+	_shot_bow_logical = _shot_from_logical.lerp(_shot_target_floor, 0.5) \
+			+ Vector2(-unit.y, unit.x) * SHOT_BOW_CELLS
+	# Where a miss comes down: the power error carries the ball short or long along
+	# the line to the ring, as a fraction of the distance it had to travel, and the
+	# dial error swings it off to that side by an angle. Both keep a floor, so a
+	# shot that only just missed still lands clear of the ring instead of looking
+	# like it went through it. A make offsets by neither and drops through instead.
+	var reach := _shot_miss_error(_shot_power, band)
+	var side := _side_error(_shot_direction, valid)
+	var short_long := signf(reach) * (SHOT_MISS_MIN_REACH + absf(reach) * SHOT_MISS_REACH) * range_cells
+	var wide := signf(side) * (SHOT_MISS_MIN_ANGLE + absf(side) * SHOT_MISS_ANGLE) * range_cells
+	_shot_miss_floor = _shot_target_floor + unit * short_long + Vector2(-unit.y, unit.x) * wide
+	var arrival_floor := _shot_target_floor if meter_made else _shot_miss_floor
+	# A scoring shot arrives at the dedicated marker's global screen position.
+	# Misses still use their calculated floor landing for the visual outcome.
+	var arrival_screen := hoop_target_screen if meter_made else _project_point(arrival_floor) - Vector2(0.0, _shot_ring_height * cell_h)
+	var entry_direction := _shot_ground_at(1.0) - _shot_ground_at(0.94)
+	var descending := _shot_height_at(1.0) < _shot_height_at(0.94)
+	var made: bool = meter_made
+	if goal != null:
+		made = goal.accepts_entry(
+			arrival_screen, arrival_floor, _shot_target_floor, entry_direction, descending)
+	_shot_made = made
+	# The flight is timed off the ground the ball actually has to cover, so a long
+	# shot hangs in the air longer than a short one.
+	_shot_flight = clampf(SHOT_FLIGHT_MIN + range_cells * SHOT_FLIGHT_PER_CELL,
+			SHOT_FLIGHT_MIN, SHOT_FLIGHT_MAX)
+	_start_shot_rotation_tween(hoop_target_screen - player.position)
+	_shot_t = 0.0
+	_shot_drop = 0.0
+	_shot_active = true
+	ui.show_message("Shot away - %s." % ("on target" if made else "off target"), true)
+	queue_redraw()
+
+
+## How far a power value sits outside its required range, as a signed 0..1: 0
+## inside the range, negative when the shot was too weak, positive when it was
+## too strong. Inside the range is the whole of the judging rule - the ball goes
+## through - so this only decides where a miss comes down.
+func _shot_miss_error(value: float, rng: Vector2) -> float:
+	if value < rng.x:
+		return -clampf((rng.x - value) / maxf(rng.x, 0.0001), 0.0, 1.0)
+	if value > rng.y:
+		return clampf((value - rng.y) / maxf(1.0 - rng.y, 0.0001), 0.0, 1.0)
+	return 0.0
+
+
+## The same, for the dial: signed so a dial miss is pushed to the side it was
+## aimed at rather than always the same way. 0 inside the green arc.
+func _side_error(value: float, rng: Vector2) -> float:
+	if value < rng.x:
+		return -clampf((rng.x - value) / maxf(rng.x, 0.0001), 0.0, 1.0)
+	if value > rng.y:
+		return clampf((value - rng.y) / maxf(1.0 - rng.y, 0.0001), 0.0, 1.0)
+	return 0.0
+
+
+## The clock on the shot. The ball rides its flight to the ring, then drops
+## through the net (or past it, on a miss); the verdict is only called once it has
+## come down, so the round beats after the ball, not before it.
+func _advance_shot(delta: float) -> void:
+	if not _shot_active:
+		return
+	if _shot_t < _shot_flight:
+		_shot_t = minf(_shot_t + delta, _shot_flight)
+		return
+	_shot_drop += delta
+	if _shot_drop >= SHOT_DROP_TIME:
+		_resolve_shot()
+
+
+## The ball has come down. This is where the shot reports itself and hands the
+## round back: a make is the perfect shot the avatar reacts to, and either way the
+## next feed follows.
+func _resolve_shot() -> void:
+	_shot_active = false
+	# The mark goes where the ball actually came down: under the ring on a make,
+	# and on the spot the miss carried it to otherwise.
+	_landing_mark = _shot_miss_floor
+	_landing_timer = SHOT_LANDING_MARK_TIME
+	# The ball is out of the token's hands now, so the coach can take the next
+	# feed without this round still owning it.
+	_throw_pending = false
+	_ball_loose = false
+	if _shot_made:
+		_successes += 1
+		report_shot_result(true)
+		state = State.COMPLETE
+		_complete_timer = SHOT_RESULT_TIME
+		ui.set_phase_status("GOAL")
+		ui.show_message("Goal! The ball dropped through the ring.", true)
+	else:
+		report_shot_result(false)
+		state = State.MISS
+		_miss_timer = SHOT_RESULT_TIME
+		ui.set_phase_status("SHOT MISSED")
+		ui.show_message("Shot missed - the ball came down beside the ring.", false)
+	ui.set_instruction("")
+	queue_redraw()
+
+
+## The visible post is anchored at the goal base, but the shot target is the
+## dedicated HoopTarget marker at the actual hoop position.
+func _goal_target_screen() -> Vector2:
+	if goal != null and goal.hoop_target != null:
+		return goal.hoop_target.global_position
+	return grid_to_screen(DEFAULT_GOAL_CELL) - Vector2(0.0, 1.7 * cell_h)
+
+
+## Convert the marker's global screen position back to the logical floor point
+## directly below the hoop. The vertical lift is removed before unprojecting.
+func _goal_floor_logical() -> Vector2:
+	var target_screen := _goal_target_screen()
+	var target_height := goal.hoop_height_cells if goal != null else 1.7
+	return _unproject_point(target_screen + Vector2(0.0, target_height * cell_h))
+
+
+## Start the drawn ball seam at the player-to-hoop angle and tween its spin.
+## Higher selected power produces more turns; the signed trajectory angle selects
+## the spin direction and adds a small angle-based amount.
+func _start_shot_rotation_tween(to_goal_screen: Vector2) -> void:
+	var trajectory_angle := to_goal_screen.angle()
+	var angle_factor := clampf(absf(wrapf(trajectory_angle, -PI, PI)) / PI, 0.0, 1.0)
+	var power_factor := clampf(_shot_power, 0.0, 1.0)
+	var turns := lerpf(1.5, 4.0, power_factor) + angle_factor * 0.75
+	var spin_sign := -1.0 if trajectory_angle < 0.0 else 1.0
+	var start_angle := trajectory_angle
+	var end_angle := start_angle + spin_sign * TAU * turns
+	_shot_rotation = start_angle
+	if _shot_rotation_tween != null and _shot_rotation_tween.is_valid():
+		_shot_rotation_tween.kill()
+	_shot_rotation_tween = create_tween()
+	_shot_rotation_tween.tween_method(
+		_set_shot_rotation,
+		start_angle,
+		end_angle,
+		_shot_flight + SHOT_DROP_TIME).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+
+
+func _set_shot_rotation(value: float) -> void:
+	_shot_rotation = value
+
+
+## The shot ball on its way to the ring: up over a bowed path to the ring's height,
+## then down through the net. Drawn rather than simulated, because a shot is a
+## short arc between two known points - the token's hands and the ring - and
+## drawing it from those two points is what keeps it arriving at the ring it was
+## aimed at, at the height the ring actually hangs.
+##
+## Two things are carried separately and combined here: the GROUND track, which is
+## the horizontal path (a projected curve to the floor point under the ring), and
+## the HEIGHT above the floor, in court cells. The ball is drawn at the ground
+## point lifted by that height, which is what stops a flight that travels all the
+## way to the post from reading as a ball sliding along the floor.
+func _draw_shot_ball() -> void:
+	if not _shot_active:
+		return
+	var t := clampf(_shot_t / maxf(_shot_flight, 0.0001), 0.0, 1.0)
+	var ball_r: float = player.radius * 1.18
+	var ground := _shot_ground_at(t)
+	var height := _shot_height_at(t)
+	if _shot_drop > 0.0:
+		# The ball has reached the ring and is on its way down: a make drops
+		# through the opening it arrived over, and a miss carries on outward and
+		# down to the floor it actually fell on, which is where the mark is left.
+		var s := clampf(_shot_drop / SHOT_DROP_TIME, 0.0, 1.0)
+		ground = ground.lerp(_project_point(_shot_miss_floor), s)
+		height = lerpf(_shot_ring_height, 0.0, s)
+	# A ball up in the air reads as nearer the camera, so it grows with its height.
+	ball_r *= 1.0 + 0.22 * clampf(height / maxf(_shot_ring_height, 0.001), 0.0, 1.0)
+	var screen := ground - Vector2(0.0, height * cell_h)
+	_trace_shot_path(t)
+	# The shadow stays flat on the floor underneath, so the ball reads as off it.
+	draw_colored_polygon(_floor_ellipse(_unproject_point(ground), ball_r * 0.95),
+			Color(0, 0, 0, 0.12))
+	var seam_angle := _shot_rotation
+	draw_circle(screen, ball_r, PAL_BALL)
+	draw_arc(screen, ball_r * 0.82, seam_angle - 1.2, seam_angle + 3.3, 16, Color(1, 1, 1, 0.5), 2.0, true)
+	draw_arc(screen, ball_r * 0.82, seam_angle + 1.9, seam_angle + 6.4, 16, Color(1, 1, 1, 0.5), 2.0, true)
+	draw_circle(screen + Vector2(-ball_r * 0.32, -ball_r * 0.38).rotated(seam_angle), ball_r * 0.2, Color(1, 1, 1, 0.55))
+
+
+## The shot's horizontal path at a normalized point through its flight, in screen
+## space: the projected bowed track from the token to the floor point under the
+## ring. This is the ground the ball is over, not where the ball is drawn.
+func _shot_ground_at(u: float) -> Vector2:
+	return _quadratic(
+			_project_point(_shot_from_logical),
+			_project_point(_shot_bow_logical),
+			_project_point(_shot_target_floor),
+			clampf(u, 0.0, 1.0))
+
+
+## How high above the floor the ball is, in court cells, at a normalized point
+## through its flight. It leaves the hands at SHOT_RELEASE_HEIGHT and is exactly at
+## the ring's height when it gets there, with the extra arc lift through the middle
+## - so a shot that reaches the post arrives at the hoop rather than on the floor
+## beneath it.
+func _shot_height_at(u: float) -> float:
+	var t := clampf(u, 0.0, 1.0)
+	return SHOT_RELEASE_HEIGHT + (_shot_ring_height - SHOT_RELEASE_HEIGHT) * t \
+			+ _shot_arc * 4.0 * t * (1.0 - t)
+
+
+## A faint arc from the token to the ring, so the shot reads as a path rather than
+## a ball that teleports. It traces the same ground track and the same height as
+## the ball, so the line and the ball can never disagree about the flight. It fades
+## out as the ball covers it.
+func _trace_shot_path(t: float) -> void:
+	var pts := PackedVector2Array()
+	for i in range(25):
+		var u := float(i) / 24.0
+		if u > maxf(t, 0.04):
+			break
+		pts.append(_shot_ground_at(u) - Vector2(0.0, _shot_height_at(u) * cell_h))
+	if pts.size() < 2:
+		return
+	draw_polyline(pts, Color(1.0, 1.0, 1.0, 0.22 * (1.0 - 0.6 * t)), 3.0, true)
+
+
+## Where the last shot came down, marked on the floor for a moment so a miss can
+## be read off the court: green in the ring, white anywhere else.
+func _draw_landing_mark() -> void:
+	if _landing_timer <= 0.0:
+		return
+	var fade := clampf(_landing_timer / 1.4, 0.0, 1.0)
+	var col := Color(0.36, 0.95, 0.55, 0.75 * fade) if _shot_made \
+			else Color(1.0, 1.0, 1.0, 0.55 * fade)
+	var r: float = player.radius * (1.0 + 1.2 * (1.0 - fade))
+	draw_polyline(_floor_ellipse(_landing_mark, r), col, 4.0, true)
+
+
+func _quadratic(a: Vector2, b: Vector2, c: Vector2, t: float) -> Vector2:
+	return a.lerp(b, t).lerp(b.lerp(c, t), t)
+
+
+## Clears a selected shot. Re-picking the power throws the old direction away too,
+## because a direction is only ever chosen against a settled power.
+func _clear_selected_shot() -> void:
+	_selected_power = -1.0
+	_selected_direction = -1.0
+	_aiming = false
+
+
+## The only place the meter is shown and hidden, so possession and the flight can
+## never disagree about whether the player is still choosing.
+func _change_shot_meter(on: bool) -> void:
+	if on == _meter_shown:
+		return
+	_meter_shown = on
+	ui.set_shot_meter_visible(on)
+
+
+## Drives the aim needle from outside, for a shooting move that picks its own
+## direction instead of the player's slide on the dial.
+func set_shot_direction(value: float) -> void:
+	_selected_direction = clampf(value, 0.0, 1.0)
+
+
+## Takes the shot with whatever is selected. This is the seam for a future shooting
+## move that fires without a release on the dial; the release path in
+## _release_with_ball() calls this after settling the direction.
+func shoot() -> void:
+	if _selected_power < 0.0 or _selected_direction < 0.0:
+		return
+	_fire_shot()
+
+
+## True while a shot ball is on its way to the ring or dropping through it.
+func shot_active() -> bool:
+	return _shot_active
+
+
+## True if the token holds the ball and the court is free for a new drag. The shot
+## takes the drag input for itself, so this is false while the player is choosing.
+func court_drag_allowed() -> bool:
+	return not _has_ball
 
 
 ## Straight-line distance from the token to the post, in court cells. Corner to
 ## corner is about 14.1 cells, which is what the meter's range is scaled from.
 func _distance_to_post_cells() -> float:
-	return (Vector2(player_cell) - Vector2(POST_CELL)).length()
+	var floor_point := _goal_floor_logical()
+	var target_cell := Vector2(
+		(floor_point.x - court_rect.position.x) / maxf(cell_w, 0.001),
+		(floor_point.y - court_rect.position.y) / maxf(cell_h, 0.001))
+	return Vector2(player_cell).distance_to(target_cell)
+
+
+func _goal_cell() -> Vector2i:
+	if goal != null:
+		return goal.goal_cell
+	return DEFAULT_GOAL_CELL
 
 
 ## Where the best shot direction sits on the direction dial, 0 = dial left end and
@@ -1286,7 +1786,7 @@ func _distance_to_post_cells() -> float:
 ## end. A post below the token has no place on the upper half of the dial, so it
 ## clamps to the nearest end.
 func _optimal_direction_t() -> float:
-	var v: Vector2 = grid_to_screen(POST_CELL) - player.position
+	var v: Vector2 = _goal_target_screen() - player.position
 	if v.length() < 0.001:
 		return 0.5
 	# Screen angle: 0 deg points right, -90 deg points up the screen. The dial
@@ -1296,19 +1796,29 @@ func _optimal_direction_t() -> float:
 	return clampf((deg + 180.0) / 180.0, 0.0, 1.0)
 
 
-## One line of shot state for the developer debug panel.
+## One line of shot state for the developer debug panel. It covers all three of
+## the states a shot passes through: choosing (the token holds the ball), in the
+## air, and settled.
 func _power_debug_text() -> String:
+	if _shot_active:
+		return "shot away %d%% / aim %d%% -> %s" % [
+			roundi(_shot_power * 100.0), roundi(_shot_direction * 100.0),
+			"IN" if _shot_made else "OUT"]
+	if _landing_timer > 0.0:
+		return "last shot %s" % ("scored" if _shot_made else "missed")
 	if not _has_ball:
 		return "no ball"
-	var band: Vector2 = ui.power_gauge_required_range()
+	var band: Vector2 = ui.shot_meter_required_range()
 	# The selected value only exists after a hold-and-release, so it reads "-"
 	# until the player has chosen one.
 	var shot_txt := ", shot -"
 	if _selected_power >= 0.0:
-		var valid: Vector2 = ui.direction_gauge_valid_range()
+		var valid: Vector2 = ui.shot_meter_valid_range()
 		shot_txt = ", shot %d%%, dir %d-%d%%" % [
 			roundi(_selected_power * 100.0),
 			roundi(valid.x * 100.0), roundi(valid.y * 100.0)]
+		if _selected_direction >= 0.0:
+			shot_txt += ", aimed %d%%" % roundi(_selected_direction * 100.0)
 	return "holding %.1f cells, need %d-%d%%, %.1fs left%s" % [
 		_distance_to_post_cells(), roundi(band.x * 100.0), roundi(band.y * 100.0),
 		maxf(_complete_timer, 0.0), shot_txt]
@@ -1322,13 +1832,19 @@ func has_ball() -> bool:
 ## The power range an accurate shot needs from the token's current cell, as a
 ## (low, high) pair in 0..1.
 func shot_power_required_range() -> Vector2:
-	return ui.power_gauge_required_range()
+	return ui.shot_meter_required_range()
 
 
-## Drives the needle from outside, for a shooting move that charges its own
-## power instead of the meter's preview sweep.
+## The direction range an accurate shot needs from the token's current cell, as a
+## (low, high) pair in 0..1 across the dial.
+func shot_direction_valid_range() -> Vector2:
+	return ui.shot_meter_valid_range()
+
+
+## Drives the power needle from outside, for a shooting move that charges its own
+## power instead of the player's hold.
 func set_shot_power(value: float) -> void:
-	ui.set_power_gauge_power(value)
+	ui.set_shot_meter_power(value)
 
 
 ## Marks where the feed will land. It reads the coach's deterministic destination

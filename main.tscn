@@ -6,7 +6,11 @@
 [ext_resource type="Script" uid="uid://b2wer5ahta0t6" path="res://scripts/court.gd" id="4_court"]
 [ext_resource type="TileSet" uid="uid://bg31wj3jfoqgf" path="res://tiles/court_tileset.tres" id="5_tileset"]
 [ext_resource type="SpriteFrames" uid="uid://ws4pwme02nlb" path="res://images/player_frames.tres" id="6_frames"]
+[ext_resource type="Script" uid="uid://cps6o5e462jd1" path="res://scripts/goal.gd" id="7_5vw27"]
 [ext_resource type="Texture2D" uid="uid://dge0okvxpc3ew" path="res://images/netball_post.png" id="7_272bh"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_5vw27"]
+size = Vector2(96, 72)
 
 [node name="Main" type="Node2D" unique_id=1529178230]
 script = ExtResource("1_main")
@@ -38,6 +42,20 @@ tile_set = ExtResource("5_tileset")
 z_index = -1
 script = ExtResource("4_court")
 
-[node name="GoalPost" type="Sprite2D" parent="." unique_id=1037781015]
+[node name="Goal" type="Node2D" parent="." unique_id=718386142]
+script = ExtResource("7_5vw27")
+
+[node name="ScoringZone" type="Area2D" parent="Goal" unique_id=2141833384]
+collision_layer = 0
+collision_mask = 0
+monitoring = false
+monitorable = false
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Goal/ScoringZone" unique_id=171324981]
+shape = SubResource("RectangleShape2D_5vw27")
+
+[node name="GoalPost" type="Sprite2D" parent="Goal" unique_id=1037781015]
 z_index = 5
 texture = ExtResource("7_272bh")
+
+[node name="HoopTarget" type="Marker2D" parent="Goal" unique_id=288204871]

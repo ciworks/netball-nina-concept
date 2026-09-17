@@ -143,6 +143,16 @@ const POSSESSION_TIME := 3.0
 ## gets a window of its own before the possession is classed as a missed shot.
 const AIM_WINDOW_TIME := 3.0
 
+## --- Match clock -------------------------------------------------------------
+## One game is a 30 second match, counted down on the top-centre readout. The
+## clock runs from the moment the court is laid out until it reaches zero, and
+## the score beside it is that game's score: a goal only counts while the clock
+## is running. FULL_TIME_HOLD is the beat the final score stays up for before the
+## next 30 second game starts, so the readout and the score always belong to the
+## same game.
+const MATCH_TIME := 30.0
+const FULL_TIME_HOLD := 3.5
+
 @onready var player = $Player
 @onready var ui: CanvasLayer = $UI
 @onready var court_markings: TileMapLayer = $CourtRig/CourtMarkings
@@ -194,6 +204,16 @@ var _miss_timer := 0.0
 var _phase := 0.0
 var _debug_accum := 0.0
 var _successes := 0
+## Goals scored, one point per shot that went through the ring. Main owns the
+## number and pushes it to the HUD; random_test() is the reset seam.
+var _goals := 0
+
+## Clock state for the current match. _time_left is what the HUD shows;
+## _clock_running is false between full time and the next game; _full_time_hold
+## counts that gap down.
+var _time_left := MATCH_TIME
+var _clock_running := true
+var _full_time_hold := 0.0
 
 # Coach feed state. _throw_pending holds a finished feed until the player is not
 # mid-action; the outcome was already judged the moment the ball last touched
@@ -257,6 +277,9 @@ func _process(delta: float) -> void:
 	# The token's settling clock. It is only reset when the token changes cell, so
 	# the coach can tell a player who is set on the ball from one still arriving.
 	_cell_dwell += delta
+	# The match clock runs on its own, ahead of whatever the round is doing: a
+	# feed or a shot in the air does not stop the game clock.
+	_tick_match_clock(delta)
 	match state:
 		State.INVALID:
 			_invalid_timer -= delta
@@ -578,6 +601,9 @@ func _set_default_instruction() -> void:
 		ui.set_instruction("")
 
 
+## Starts a fresh 30 second game on a new random court. This is the restart seam:
+## the score and the clock are reset here together, so the number on the score
+## readout always belongs to the game the clock is counting down.
 func random_test() -> void:
 	_current_scenario = -1
 	player_cell = _random_cell()
@@ -588,7 +614,46 @@ func random_test() -> void:
 			target_cell = t
 			break
 		tries += 1
+	_goals = 0
+	ui.set_score(_goals)
+	_time_left = MATCH_TIME
+	_clock_running = true
+	_full_time_hold = 0.0
+	ui.set_time_remaining(_time_left)
 	_start_test("")
+
+
+## The match clock. It counts the current game down to zero, calls full time, and
+## then starts the next 30 second game, so the clock is always either running a
+## game or waiting to start one.
+##
+## The clock keeps running through a feed, a walk and a shot on purpose: it is
+## the game's clock, not the round's. It also runs off its own state rather than
+## the round machine's State, so nothing a round does can pause it or make it
+## count twice.
+func _tick_match_clock(delta: float) -> void:
+	if _clock_running:
+		_time_left = maxf(_time_left - delta, 0.0)
+		ui.set_time_remaining(_time_left)
+		if _time_left <= 0.0:
+			_full_time()
+		return
+	if _full_time_hold > 0.0:
+		_full_time_hold -= delta
+		if _full_time_hold <= 0.0:
+			random_test()
+
+
+## Full time: the clock stops and the final score is called. The round is left to
+## finish what it was doing, and the next game takes over after FULL_TIME_HOLD.
+func _full_time() -> void:
+	_clock_running = false
+	_full_time_hold = FULL_TIME_HOLD
+	var goals := "goal" if _goals == 1 else "goals"
+	ui.set_phase_status("FULL TIME")
+	ui.show_message("Full time - %d %s. Next game starting..." % [_goals, goals], true)
+	ui.set_instruction("")
+	queue_redraw()
 
 
 func load_scenario(index: int) -> void:
@@ -1567,6 +1632,9 @@ func _resolve_shot() -> void:
 	_ball_loose = false
 	if _shot_made:
 		_successes += 1
+		# A shot through the ring is a goal: one point on the top-centre score.
+		_goals += 1
+		ui.set_score(_goals)
 		report_shot_result(true)
 		state = State.COMPLETE
 		_complete_timer = SHOT_RESULT_TIME

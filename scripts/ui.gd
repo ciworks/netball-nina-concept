@@ -29,6 +29,13 @@ var _reset_btn: Button
 var _scenario_btns: Array[Button] = []
 var _avatar: PlayerAvatar
 var _shot_meter: ShotMeter
+## Top-centre score readout: one point per goal scored. Main owns the number and
+## pushes it through set_score().
+var _score_panel: PanelContainer
+var _score: Label
+## The match clock beside the score. Main counts the match down and hands the
+## seconds left to set_time_remaining(); see match_clock.gd for the readout.
+var _clock: MatchClock
 
 var _feedback_timer := 0.0
 var _rating_label: Label
@@ -187,6 +194,22 @@ func avatar_shot_made() -> void:
 func avatar_shot_missed() -> void:
 	if _avatar:
 		_avatar.react_shot_missed()
+
+
+## --- Score -------------------------------------------------------------------
+## The goal count on the top centre of the screen. Main counts the goals and
+## calls this with the running total, so the HUD never keeps a second tally of
+## its own to drift out of step.
+func set_score(points: int) -> void:
+	if _score:
+		_score.text = "SCORE %d" % points
+
+
+## Seconds left in the current match, pushed every frame by Main. Like the score,
+## the HUD only renders the number it is handed and keeps no clock of its own.
+func set_time_remaining(seconds: float) -> void:
+	if _clock:
+		_clock.set_seconds(seconds)
 
 
 ## --- Shot meter -------------------------------------------------------------
@@ -375,6 +398,51 @@ func _build() -> void:
 	_avatar.offset_right = AVATAR_MARGIN + PlayerAvatar.BOX_SIZE
 	_avatar.offset_bottom = AVATAR_TOP + PlayerAvatar.BOX_SIZE
 	root.add_child(_avatar)
+
+	# Score, top centre: one point per goal scored. It sits on its own centred
+	# row rather than inside the top bar, so it stays in the middle of the screen
+	# however wide the viewport is stretched, clear of the avatar on the left and
+	# the status pill on the right. Same ignore-only root as the rest of the HUD,
+	# so it never swallows a court drag.
+	var score_row := CenterContainer.new()
+	score_row.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	score_row.offset_top = 8.0
+	# The row is as tall as the clock, which is the taller of the two readouts, so
+	# neither is squashed and the score can be centred against it.
+	score_row.offset_bottom = 8.0 + MatchClock.PANEL_H
+	score_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(score_row)
+
+	var score_bar := HBoxContainer.new()
+	score_bar.add_theme_constant_override("separation", 10)
+	score_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	score_row.add_child(score_bar)
+
+	_score_panel = PanelContainer.new()
+	# Its own height, centred against the clock rather than stretched to it.
+	_score_panel.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_score_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var score_sb := StyleBoxFlat.new()
+	score_sb.bg_color = Color(0.05, 0.22, 0.34, 0.82)
+	score_sb.set_corner_radius_all(12)
+	score_sb.set_content_margin_all(8)
+	_score_panel.add_theme_stylebox_override("panel", score_sb)
+	score_bar.add_child(_score_panel)
+
+	_score = Label.new()
+	_score.text = "SCORE 0"
+	_score.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_score.add_theme_font_size_override("font_size", 18)
+	_score.add_theme_color_override("font_color", Color(1, 0.88, 0.55, 0.98))
+	_score.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_score_panel.add_child(_score)
+
+	# The match clock sits beside the score: white seven-segment digits on their
+	# own black panel (see match_clock.gd). It is a display only - Main counts the
+	# match down and this shows the seconds it is handed.
+	_clock = MatchClock.new()
+	_clock.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	score_bar.add_child(_clock)
 
 	# Top bar: status and toggles, pushed to the right by a spacer. Its left edge
 	# still clears the avatar. The scenario quick picks (A-E) and the reset button
